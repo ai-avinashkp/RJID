@@ -1,0 +1,27 @@
+[package]
+name = "rji-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rjid"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+rji-core.workspace = true
+rji-theme.workspace = true
+rji-settings.workspace = true
+rji-editor.workspace = true
+rji-terminal.workspace = true
+rji-project-java.workspace = true
+rji-lsp-client.workspace = true
+rji-jdwp-client.workspace = true
+rji-updates.workspace = true
+rji-plugins.workspace = true
+rji-android.workspace = true
+async-channel.workspace = true

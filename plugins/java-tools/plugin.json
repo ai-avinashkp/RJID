@@ -1,0 +1,16 @@
+{
+  "id": "java-tools",
+  "name": "Java Tools",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "Text utilities: sort lines, convert case, count text. (Getters/setters are built into the editor: right-click ▸ Generate.)",
+  "author": "RustedJavaIDE",
+  "wasm": "plugin.wasm",
+  "commands": [
+    { "id": "sort-lines", "title": "Sort Lines" },
+    { "id": "camel-snake", "title": "Toggle camelCase / snake_case" },
+    { "id": "upper", "title": "UPPERCASE" },
+    { "id": "lower", "title": "lowercase" },
+    { "id": "count", "title": "Count Lines, Words, Characters" }
+  ]
+}

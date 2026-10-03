@@ -1,0 +1,6 @@
+/target
+/.rji-settings
+.rji/
+*.pdb
+plugins/java-tools/target/
+.claude/

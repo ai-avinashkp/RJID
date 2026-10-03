@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/core",
+    "crates/theme",
+    "crates/settings",
+    "crates/editor",
+    "crates/terminal",
+    "crates/project-java",
+    "crates/lsp-client",
+    "crates/jdwp-client",
+    "crates/updates",
+    "crates/plugins",
+    "crates/android",
+]
+
+[workspace.package]
+edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[workspace.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.21.0", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.21.0", package = "gpui_platform" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+rji-core = { path = "crates/core" }
+rji-theme = { path = "crates/theme" }
+rji-settings = { path = "crates/settings" }
+rji-editor = { path = "crates/editor" }
+rji-terminal = { path = "crates/terminal" }
+rji-project-java = { path = "crates/project-java" }
+rji-lsp-client = { path = "crates/lsp-client" }
+rji-jdwp-client = { path = "crates/jdwp-client" }
+rji-updates = { path = "crates/updates" }
+rji-plugins = { path = "crates/plugins" }
+rji-android = { path = "crates/android" }
+async-channel = "2"

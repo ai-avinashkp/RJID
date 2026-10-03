@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-label="RJID — Rust for Java IDE">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b1d23"/>
+      <stop offset="1" stop-color="#262a33"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8743b"/>
+      <stop offset="1" stop-color="#f2b134"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="400" fill="url(#bg)"/>
+  <!-- editor-window motif -->
+  <g transform="translate(760 70)">
+    <rect width="440" height="260" rx="14" fill="#14161b" stroke="#3a3f4b"/>
+    <circle cx="24" cy="22" r="6" fill="#e8743b"/>
+    <circle cx="44" cy="22" r="6" fill="#f2b134"/>
+    <circle cx="64" cy="22" r="6" fill="#5fb878"/>
+    <g font-family="Consolas, Menlo, monospace" font-size="17">
+      <text x="28" y="78" fill="#c678dd">public class</text><text x="148" y="78" fill="#61afef">App</text><text x="186" y="78" fill="#abb2bf">{</text>
+      <text x="52" y="110" fill="#c678dd">public static void</text><text x="232" y="110" fill="#61afef">main</text><text x="274" y="110" fill="#abb2bf">(String[] a) {</text>
+      <text x="76" y="142" fill="#abb2bf">System.out.println(</text><text x="268" y="142" fill="#98c379">"Hi"</text><text x="312" y="142" fill="#abb2bf">);</text>
+      <text x="52" y="174" fill="#abb2bf">}</text>
+      <text x="28" y="206" fill="#abb2bf">}</text>
+    </g>
+    <rect x="0" y="226" width="440" height="34" rx="0" fill="#1f232b"/>
+    <text x="20" y="249" font-family="Consolas, Menlo, monospace" font-size="14" fill="#5fb878">▶ mvn spring-boot:run  ● localhost:8080</text>
+  </g>
+  <text x="80" y="190" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="120" font-weight="700" fill="url(#accent)">RJID</text>
+  <text x="84" y="245" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="34" fill="#e6e6e6">Rust for Java IDE</text>
+  <text x="84" y="295" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" fill="#9aa3b2">A fast, GPU-rendered Java IDE written in Rust.</text>
+  <text x="84" y="328" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" fill="#9aa3b2">Maven · Gradle · Spring Boot · JavaFX · Debugger · Terminal</text>
+</svg>

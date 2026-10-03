@@ -1,0 +1,11 @@
+[package]
+name = "rji-terminal"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+portable-pty = "0.8"
+async-channel = "2"
+alacritty_terminal = "0.26"
