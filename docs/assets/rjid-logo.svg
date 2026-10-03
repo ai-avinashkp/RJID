@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="RJID logo">
+  <title>RJID — Rust for Java IDE</title>
+  <defs>
+    <linearGradient id="rjid-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22252d"/>
+      <stop offset="1" stop-color="#15171c"/>
+    </linearGradient>
+    <linearGradient id="rjid-rust" gradientUnits="userSpaceOnUse" x1="96" y1="80" x2="416" y2="432">
+      <stop offset="0" stop-color="#f2b134"/>
+      <stop offset="0.55" stop-color="#e8743b"/>
+      <stop offset="1" stop-color="#c2410c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App-icon tile -->
+  <rect width="512" height="512" rx="112" fill="url(#rjid-bg)"/>
+
+  <!-- Rust gear: 12 teeth around a ring, cut as a mask so one gradient
+       flows across the whole gear (rotated teeth would rotate their own). -->
+  <mask id="rjid-gear">
+  <g fill="#fff">
+    <rect id="rjid-tooth" x="232" y="58" width="48" height="70" rx="10"/>
+    <use href="#rjid-tooth" transform="rotate(30 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(60 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(90 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(120 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(150 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(180 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(210 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(240 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(270 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(300 256 256)"/>
+    <use href="#rjid-tooth" transform="rotate(330 256 256)"/>
+    <circle cx="256" cy="256" r="160"/>
+  </g>
+  </mask>
+  <rect width="512" height="512" fill="url(#rjid-rust)" mask="url(#rjid-gear)"/>
+  <!-- Gear hole -->
+  <circle cx="256" cy="256" r="122" fill="#191b21"/>
+
+  <!-- Wordmark, centered -->
+  <text x="256" y="256" text-anchor="middle" dominant-baseline="central"
+        font-family="Segoe UI, Helvetica Neue, Arial, sans-serif" font-size="84" font-weight="800"
+        letter-spacing="2" fill="#ffffff">RJID</text>
+</svg>

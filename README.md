@@ -1,4 +1,10 @@
 <p align="center">
+  <img src="docs/assets/rjid-logo-512.png" alt="RJID logo" width="140">
+</p>
+
+<h1 align="center">RJID — Rust for Java IDE</h1>
+
+<p align="center">
   <img src="docs/assets/rjid-banner.svg" alt="RJID — Rust for Java IDE" width="100%">
 </p>
 
