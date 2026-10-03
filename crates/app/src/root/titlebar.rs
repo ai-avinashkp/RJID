@@ -442,7 +442,7 @@ impl RootView {
             A::RefreshTree => self.refresh_tree(cx),
             A::NextTab => self.cycle_tab(true, window, cx),
             A::PreviousTab => self.cycle_tab(false, window, cx),
-            A::Run => self.run_active_config(cx),
+            A::Run => self.run_active_config(window, cx),
             A::RunCommand(command) => self.run_in_terminal(&command, cx),
             A::Debug => self.start_debug(window, cx),
             A::DebugCommand(command) => self.debug_command(&command, window, cx),

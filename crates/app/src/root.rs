@@ -244,6 +244,7 @@ impl RootView {
         };
         if let Some(path) = root.workspace_root.clone() {
             root.remember_workspace(&path);
+            root.prune_placeholder_run_configs();
         }
         root.maybe_check_updates(cx);
         root
@@ -487,6 +488,7 @@ impl RootView {
         self.tabs.clear();
         self.active_tab = None;
         self.remember_workspace(&path);
+        self.prune_placeholder_run_configs();
         if self.app_settings.updates.check_automatically {
             // A different project pins different versions: re-check it.
             self.update_report = None;
@@ -988,9 +990,16 @@ impl RootView {
         cx.notify();
     }
 
-    fn run_active_config(&mut self, cx: &mut Context<Self>) {
+    fn run_active_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_run_config() {
-            Some(config) => self.run_in_terminal(&config.command, cx),
+            Some(config) => {
+                if let Some(problem) = self.stale_run_config(&config) {
+                    self.notify_user(problem);
+                    self.open_run_configs(window, cx);
+                    return;
+                }
+                self.run_in_terminal(&config.command, cx)
+            }
             None => {
                 self.notify_user("Nothing to run yet — open Run ▸ Run Configurations… to add a command");
                 cx.notify();
@@ -1026,6 +1035,11 @@ impl RootView {
             cx.notify();
             return;
         };
+        if let Some(problem) = self.stale_run_config(&config) {
+            self.notify_user(problem);
+            self.open_run_configs(window, cx);
+            return;
+        }
         self.debug_command(&config.command, window, cx);
     }
 
@@ -1276,7 +1290,7 @@ impl RootView {
                 }
             }
             "f5" if shift => self.stop_debug(cx),
-            "f5" => self.run_active_config(cx),
+            "f5" => self.run_active_config(window, cx),
             "f8" => self.resume_debug(cx),
             "f10" => self.step(StepDepth::Over, cx),
             "f11" if shift => self.step(StepDepth::Out, cx),
@@ -1458,8 +1472,8 @@ impl RootView {
                     );
                     let can_debug = config.as_ref().is_some_and(|c| debug_session::debug_launch(&c.command, 0).is_some());
                     right = right
-                        .child(icon_action("run", "▶", "Run (the selected configuration)", theme.success, config.is_some(), theme, cx.listener(|this, _, _, cx| this.run_active_config(cx))))
-                        .child(icon_action("debug", "🐞", "Debug (F5)", theme.accent, can_debug, theme, cx.listener(|this, _, window, cx| this.start_debug(window, cx))));
+                        .child(icon_action("run", "▶", "Run the selected configuration (F5)", theme.success, config.is_some(), theme, cx.listener(|this, _, window, cx| this.run_active_config(window, cx))))
+                        .child(icon_action("debug", "🐞", "Debug the selected configuration", theme.accent, can_debug, theme, cx.listener(|this, _, window, cx| this.start_debug(window, cx))));
                 }
                 state => {
                     let paused = state == DebugState::Paused;

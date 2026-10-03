@@ -25,7 +25,85 @@ pub(super) struct RunConfigsPanel {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What the old "+ Run Config" button saved as a placeholder command.
+const LEGACY_PLACEHOLDER: &str = "java -cp target/classes com.example.App";
+
+/// The main class a plain `java … <Class> [args]` command launches.
+fn java_main_class(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    let launcher = words.next()?;
+    let tool = launcher.rsplit(['/', '\\']).next().unwrap_or(launcher).trim_end_matches(".exe");
+    if tool != "java" {
+        return None;
+    }
+    let mut takes_value = false;
+    for word in words {
+        if takes_value {
+            takes_value = false;
+            continue;
+        }
+        if matches!(word, "-cp" | "-classpath" | "--class-path" | "-p" | "--module-path" | "--add-modules") {
+            takes_value = true;
+            continue;
+        }
+        if word.starts_with('-') {
+            if word == "-jar" || word == "-m" || word == "--module" {
+                return None; // runs a jar/module, not a class
+            }
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
 impl RootView {
+    /// Why a saved run configuration can't work in this project, if it
+    /// obviously can't: it launches a `java` main class the project
+    /// doesn't have (e.g. a placeholder like `com.example.App`).
+    pub(super) fn stale_run_config(&self, config: &RunConfig) -> Option<String> {
+        let class = java_main_class(&config.command)?;
+        let project = self.project.as_ref()?;
+        if project.main_classes.is_empty() || project.main_classes.iter().any(|m| m.class_name == class) {
+            return None;
+        }
+        let hint = self
+            .auto_run_config()
+            .map(|auto| format!(" Pick \"Automatic: {}\" or fix the command.", auto.name))
+            .unwrap_or_default();
+        Some(format!(
+            "Run configuration \"{}\" starts {class}, which isn't in this project.{hint}",
+            config.name
+        ))
+    }
+
+    /// Removes configurations that are still the old "+ Run Config"
+    /// placeholder and don't match this project (they silently overrode
+    /// the detected task). Called when a workspace opens.
+    pub(super) fn prune_placeholder_run_configs(&mut self) {
+        let mut settings = self.workspace_settings();
+        let before = settings.run_configs.len();
+        let stale: Vec<String> = settings
+            .run_configs
+            .iter()
+            .filter(|c| c.command.trim() == LEGACY_PLACEHOLDER && self.stale_run_config(c).is_some())
+            .map(|c| c.name.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        settings.run_configs.retain(|c| !stale.contains(&c.name));
+        if settings.active_run_config.as_ref().is_some_and(|a| stale.contains(a)) {
+            settings.active_run_config = None;
+        }
+        self.write_workspace_settings(&settings);
+        let removed = before - settings.run_configs.len();
+        self.notify_user(format!(
+            "Removed {removed} unused placeholder run configuration{} — ▶ Run now uses the detected task",
+            if removed == 1 { "" } else { "s" }
+        ));
+    }
+
     pub(super) fn open_run_configs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspace_root.is_none() {
             return;
@@ -317,5 +395,19 @@ impl RootView {
             )
             .with_priority(3),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::java_main_class;
+
+    #[test]
+    fn finds_the_main_class_of_java_commands() {
+        assert_eq!(java_main_class("java -cp target/classes com.example.App"), Some("com.example.App"));
+        assert_eq!(java_main_class("java -Xmx1g -cp out Main arg1"), Some("Main"));
+        assert_eq!(java_main_class(r"C:\jdk\bin\java.exe -classpath a;b x.Y"), Some("x.Y"));
+        assert_eq!(java_main_class("java -jar app.jar"), None);
+        assert_eq!(java_main_class("mvn spring-boot:run"), None);
     }
 }

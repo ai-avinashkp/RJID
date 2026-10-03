@@ -34,7 +34,18 @@ pub struct TerminalView {
     /// Recent output with escape sequences removed, scanned for server
     /// start-up lines (see `server_events`).
     output_tail: String,
+    /// The shell is started on the first real measurement of the panel,
+    /// at that exact size: starting it at a guessed size and resizing at
+    /// once leaves ConPTY and the emulator disagreeing about the screen
+    /// (blank rows above the prompt, a banner lost to scrollback).
+    shell_started: bool,
+    /// Input sent before the shell started (a Run command), flushed then.
+    pending_input: Vec<u8>,
 }
+
+/// Panel heights below this many rows are transient layout states (the
+/// window opening, a splitter drag) — never sized to.
+const MIN_FIT_LINES: usize = 3;
 
 /// Things the root view wants to know about what runs in the terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +61,7 @@ impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(cwd: PathBuf, theme: Theme, cx: &mut Context<Self>) -> Self {
-        let mut view = TerminalView {
+        let view = TerminalView {
             session: None,
             cwd,
             emulator: Emulator::new(120, 32),
@@ -61,8 +72,10 @@ impl TerminalView {
             cell_width: 8.0,
             selecting: false,
             output_tail: String::new(),
+            shell_started: false,
+            pending_input: Vec::new(),
         };
-        view.start_shell(cx);
+        // No shell yet: `fit_to` starts it once the panel has a real size.
         view
     }
 
@@ -71,6 +84,10 @@ impl TerminalView {
             Ok(session) => {
                 let _ = session.resize(self.emulator.lines() as u16, self.emulator.columns() as u16);
                 let rx = session.output_rx.clone();
+                let mut session = session;
+                if !self.pending_input.is_empty() {
+                    let _ = session.write_input(&std::mem::take(&mut self.pending_input));
+                }
                 self.session = Some(session);
                 cx.spawn(async move |this, cx| {
                     while let Ok(chunk) = rx.recv().await {
@@ -133,8 +150,13 @@ impl TerminalView {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if let Some(session) = self.session.as_mut() {
-            let _ = session.write_input(bytes);
+        match self.session.as_mut() {
+            Some(session) => {
+                let _ = session.write_input(bytes);
+            }
+            // Not started yet (panel not measured): keep it for the shell.
+            None if !self.shell_started => self.pending_input.extend_from_slice(bytes),
+            None => {}
         }
     }
 
@@ -188,14 +210,19 @@ impl TerminalView {
         LINE_HEIGHT * self.zoom
     }
 
-    /// Screen (row, column) under a window position.
-    fn cell_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
+    /// Screen (row, column) under a window position, and whether it's on
+    /// the right half of that cell. Positions outside the grid clamp to its
+    /// edges (so dragging past the panel still extends the selection).
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(usize, usize, bool)> {
         let bounds = self.body_bounds?;
-        let x = f32::from(position.x - bounds.left()) - PADDING;
-        let y = f32::from(position.y - bounds.top());
-        let row = (y / self.line_height()).max(0.0) as usize;
-        let col = (x / self.cell_width).max(0.0) as usize;
-        Some((row.min(self.emulator.lines() - 1), col.min(self.emulator.columns() - 1)))
+        let x = (f32::from(position.x - bounds.left()) - PADDING).max(0.0);
+        let y = f32::from(position.y - bounds.top()).max(0.0);
+        let row = (y / self.line_height()) as usize;
+        let exact = x / self.cell_width;
+        let col = exact as usize;
+        let last_col = self.emulator.columns() - 1;
+        let right_half = col > last_col || exact.fract() >= 0.5;
+        Some((row.min(self.emulator.lines() - 1), col.min(last_col), right_half))
     }
 
     /// Sizes the emulator + PTY to the panel (called after layout).
@@ -203,6 +230,16 @@ impl TerminalView {
         self.body_bounds = Some(bounds);
         let cols = ((f32::from(bounds.size.width) - 2.0 * PADDING) / self.cell_width).floor().max(2.0) as usize;
         let lines = (f32::from(bounds.size.height) / self.line_height()).floor().max(1.0) as usize;
+        if lines < MIN_FIT_LINES {
+            return;
+        }
+        if !self.shell_started {
+            self.shell_started = true;
+            self.emulator.resize(cols, lines);
+            self.start_shell(cx);
+            cx.notify();
+            return;
+        }
         if cols != self.emulator.columns() || lines != self.emulator.lines() {
             self.emulator.resize(cols, lines);
             if let Some(session) = self.session.as_ref() {
@@ -262,19 +299,16 @@ impl TerminalView {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
-        if let Some((row, col)) = self.cell_at(event.position) {
+        if let Some((row, col, right_half)) = self.cell_at(event.position) {
             let kind = match event.click_count {
                 2 => SelectKind::Word,
                 3 => SelectKind::Line,
                 _ => SelectKind::Simple,
             };
-            self.emulator.start_selection(row, col, kind);
+            // A plain press starts an empty selection that grows as you
+            // drag; double/triple-click selects a word/line at once.
+            self.emulator.start_selection(row, col, right_half, kind);
             self.selecting = kind == SelectKind::Simple;
-            if kind == SelectKind::Simple {
-                // A plain click shouldn't leave a 1-cell selection behind.
-                self.emulator.clear_selection();
-                self.emulator.start_selection(row, col, kind);
-            }
         }
         cx.notify();
     }
@@ -287,8 +321,8 @@ impl TerminalView {
             self.selecting = false;
             return;
         }
-        if let Some((row, col)) = self.cell_at(event.position) {
-            self.emulator.extend_selection(row, col);
+        if let Some((row, col, right_half)) = self.cell_at(event.position) {
+            self.emulator.extend_selection(row, col, right_half);
             cx.notify();
         }
     }
@@ -428,6 +462,7 @@ impl Render for TerminalView {
             .child(header_button("term-clear", "Clear", theme).on_click(cx.listener(|this, _, _, cx| this.clear(cx))))
             .child(header_button("term-restart", "Restart", theme).on_click(cx.listener(|this, _, _, cx| this.restart(cx))));
 
+        let cell_width = self.cell_width;
         let rows = screen.rows.iter().map(|runs| {
             div()
                 .flex()
@@ -437,7 +472,12 @@ impl Render for TerminalView {
                 .children(runs.iter().map(|run| {
                     let style = &run.style;
                     let (fg, bg) = (self.color(style.fg, style), self.color(style.bg, style));
+                    // Exactly as wide as its cells, so what's drawn lines up with
+                    // the mouse's cell math (fallback glyphs can be wider).
                     div()
+                        .flex_shrink_0()
+                        .w(px(run.text.chars().count() as f32 * cell_width))
+                        .overflow_hidden()
                         .text_color(fg)
                         .when(style.bg != TermColor::DefaultBg, |d| d.bg(bg))
                         .when(style.selected, |d| d.bg(theme.accent.opacity(0.35)))
@@ -511,6 +551,11 @@ impl Render for TerminalView {
                     |_, _, _, _| {},
                 )
                 .absolute()
+                // Pinned to the corner: without an inset an absolute element sits
+                // at its "static position" (after the rows), which skewed every
+                // mouse position and made selections land on the first line.
+                .top_0()
+                .left_0()
                 .size_full(),
             );
 

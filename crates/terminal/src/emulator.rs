@@ -183,20 +183,25 @@ impl Emulator {
         )
     }
 
-    pub fn start_selection(&mut self, row: usize, column: usize, kind: SelectKind) {
+    /// `right_half`: the press was on the right half of the cell, so the
+    /// selection boundary is that cell's right edge (as in other terminals;
+    /// it makes dragging backwards and partial-cell drags select exactly
+    /// what's under the pointer).
+    pub fn start_selection(&mut self, row: usize, column: usize, right_half: bool, kind: SelectKind) {
         let ty = match kind {
             SelectKind::Simple => SelectionType::Simple,
             SelectKind::Word => SelectionType::Semantic,
             SelectKind::Line => SelectionType::Lines,
         };
         let point = self.grid_point(row, column);
-        self.term.selection = Some(Selection::new(ty, point, Side::Left));
+        let side = if right_half { Side::Right } else { Side::Left };
+        self.term.selection = Some(Selection::new(ty, point, side));
     }
 
-    pub fn extend_selection(&mut self, row: usize, column: usize) {
+    pub fn extend_selection(&mut self, row: usize, column: usize, right_half: bool) {
         let point = self.grid_point(row, column);
         if let Some(selection) = self.term.selection.as_mut() {
-            selection.update(point, Side::Right);
+            selection.update(point, if right_half { Side::Right } else { Side::Left });
         }
     }
 
@@ -473,10 +478,18 @@ mod tests {
     fn selection_copies_text() {
         let mut emu = Emulator::new(20, 2);
         emu.feed(b"hello world");
-        emu.start_selection(0, 0, SelectKind::Simple);
-        emu.extend_selection(0, 4);
+        emu.start_selection(0, 0, false, SelectKind::Simple);
+        emu.extend_selection(0, 4, true);
         assert_eq!(emu.selected_text().as_deref(), Some("hello"));
-        emu.start_selection(0, 7, SelectKind::Word);
+        // Dragging backwards from the right half of the 'o' of "world".
+        emu.start_selection(0, 10, true, SelectKind::Simple);
+        emu.extend_selection(0, 6, false);
+        assert_eq!(emu.selected_text().as_deref(), Some("world"));
+        // A press and release inside one cell selects nothing.
+        emu.start_selection(0, 2, false, SelectKind::Simple);
+        emu.extend_selection(0, 2, false);
+        assert_eq!(emu.selected_text(), None);
+        emu.start_selection(0, 7, false, SelectKind::Word);
         assert_eq!(emu.selected_text().as_deref(), Some("world"));
     }
 
