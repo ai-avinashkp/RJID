@@ -25,14 +25,21 @@ framework behind the Zed editor). It doesn't reinvent Java tooling. It drives th
 tools you already have (the JDK, Maven, Gradle and the Eclipse JDT Language Server)
 from one fast native window.
 
-<!--
-  Screenshots: add PNGs to docs/assets/ and uncomment.
-  Good shots: (1) a Spring Boot project with the toolbar + terminal showing
-  "localhost:8080", (2) a hover popup with Javadoc, (3) right-click ▸ Generate
-  Getters and Setters dialog, (4) the debugger paused with variables.
+<p align="center">
+  <img src="docs/assets/spring-boot-run.png" alt="RJID running a Spring Boot app: the toolbar shows the detected project type and a localhost:8080 link while Tomcat logs stream in the terminal" width="100%">
+  <br><sub>One click on ▶ runs a Spring Boot app; when Tomcat is up, a <b>localhost:8080 ↗</b> link appears in the toolbar.</sub>
+</p>
 
-<p align="center"><img src="docs/assets/screenshot-editor.png" alt="RJID editor" width="100%"></p>
--->
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/editor.png" alt="Editing a Spring REST controller with syntax highlighting and an error underlined"></td>
+    <td width="50%"><img src="docs/assets/theme-high-contrast.png" alt="The high-contrast dark theme"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Java editing with live diagnostics from jdtls</sub></td>
+    <td align="center"><sub>One of 5 built-in themes (high contrast)</sub></td>
+  </tr>
+</table>
 
 ## Features
 

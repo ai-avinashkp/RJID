@@ -4,3 +4,6 @@
 *.pdb
 plugins/java-tools/target/
 .claude/
+# Raw, unredacted screenshots (may show local paths); publish redacted copies only.
+docs/assets/Screenshot *.png
+docs/assets/Themes.png
