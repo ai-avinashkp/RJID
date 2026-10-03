@@ -95,6 +95,7 @@ pub(super) enum MenuAction {
     OpenFolder,
     OpenFolderInNewWindow,
     OpenRecent(PathBuf),
+    ClearRecent,
     NewFile,
     NewFolder,
     Save,
@@ -199,6 +200,7 @@ impl RootView {
                             .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                         entries.push(item(label, None, A::OpenRecent(path)));
                     }
+                    entries.push(item("Clear Recent Folders", None, A::ClearRecent));
                 }
                 entries.extend([
                     MenuEntry::Separator,
@@ -395,6 +397,13 @@ impl RootView {
             A::OpenFolder => self.pick_folder(window, cx),
             A::OpenFolderInNewWindow => self.pick_folder_for_new_window(window, cx),
             A::OpenRecent(path) => self.open_folder(path, window, cx),
+            A::ClearRecent => {
+                // Keep only the open folder (it's reopened on the next start).
+                let current = self.workspace_root.clone();
+                self.app_settings.recent_workspaces.retain(|p| Some(p) == current.as_ref());
+                self.save_app_settings();
+                self.notify_user("Recent folders cleared");
+            }
             A::NewFile => self.prompt_new_entry(false, None, window, cx),
             A::NewFolder => self.prompt_new_entry(true, None, window, cx),
             A::Save => {
