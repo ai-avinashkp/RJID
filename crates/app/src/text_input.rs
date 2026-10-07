@@ -46,6 +46,12 @@ impl TextInput {
         self.buffer.text()
     }
 
+    /// Caret to the end, nothing selected (e.g. after a prefilled prefix).
+    pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
+        self.buffer.move_doc_end(false);
+        cx.notify();
+    }
+
     /// Replaces the content and selects all of it (so typing overwrites).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let single_line = text.lines().next().unwrap_or("");

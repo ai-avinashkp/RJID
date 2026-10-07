@@ -38,6 +38,15 @@ pub struct AppSettings {
     pub terminal_dock: TerminalDock,
     /// Terminal width in px when docked on the right.
     pub terminal_width: f32,
+    /// Save edited files when the editor loses focus (switching tabs,
+    /// clicking into the terminal, switching to another app).
+    pub auto_save: bool,
+    /// Code editor font family (`None` = the platform's default monospace).
+    pub editor_font_family: Option<String>,
+    pub editor_font_size: f32,
+    /// Terminal font family (`None` = the platform's default monospace).
+    pub terminal_font_family: Option<String>,
+    pub terminal_font_size: f32,
     pub updates: UpdateSettings,
 }
 
@@ -98,6 +107,15 @@ pub const TERMINAL_WIDTH_RANGE: (f32, f32) = (220.0, 1200.0);
 
 /// Zoom step for Ctrl+=/Ctrl+-, and the min/max clamp so text can't be
 /// zoomed into illegibility or nothingness.
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
+/// Allowed font sizes (px, before UI zoom).
+pub const FONT_SIZE_RANGE: (f32, f32) = (9.0, 28.0);
+
+pub fn clamp_font_size(size: f32) -> f32 {
+    if size.is_finite() { size.clamp(FONT_SIZE_RANGE.0, FONT_SIZE_RANGE.1) } else { DEFAULT_EDITOR_FONT_SIZE }
+}
+
 pub const ZOOM_STEP: f32 = 0.1;
 pub const ZOOM_MIN: f32 = 0.5;
 pub const ZOOM_MAX: f32 = 3.0;
@@ -117,6 +135,11 @@ impl Default for AppSettings {
             tree_side: PanelSide::Left,
             terminal_dock: TerminalDock::Bottom,
             terminal_width: 460.0,
+            auto_save: true,
+            editor_font_family: None,
+            editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
+            terminal_font_family: None,
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             updates: UpdateSettings::default(),
         }
     }

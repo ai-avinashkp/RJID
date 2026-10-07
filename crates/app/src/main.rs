@@ -4,6 +4,7 @@ mod devtools_hook;
 mod docking;
 mod editor_view;
 mod fonts;
+mod fuzzy;
 mod lsp_shared;
 mod root;
 mod scrollbar;
@@ -72,6 +73,7 @@ fn main() {
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle_for_init(), cx);
                 view.open_command_line_file(window, cx);
+                view.install_window_hooks(window, cx);
                 // Closing the window first offers to save unsaved files and
                 // stops child processes (jdtls, debugged program, shell).
                 let root = cx.entity();

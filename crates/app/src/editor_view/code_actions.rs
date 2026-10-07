@@ -59,6 +59,28 @@ enum PickKind {
     Constructor,
     ToString,
     EqualsHashCode,
+    /// Override/Implement Methods.
+    Override,
+    /// Delegate Methods (rows are field + method pairs).
+    Delegate,
+}
+
+/// One entry of the Source Action list.
+#[derive(Clone)]
+enum SourceItem {
+    /// Opens a generate dialog (or runs an editor command).
+    Command { title: &'static str, shortcut: Option<&'static str>, command: EditorCommand },
+    /// A ready-made source action from the language server.
+    Edit(Fix),
+}
+
+impl SourceItem {
+    fn title(&self) -> &str {
+        match self {
+            SourceItem::Command { title, .. } => title,
+            SourceItem::Edit(fix) => &fix.title,
+        }
+    }
 }
 
 enum DialogBody {
@@ -66,6 +88,7 @@ enum DialogBody {
     Fields { kind: PickKind, rows: Vec<PickRow>, extra: Value },
     Accessors(Vec<AccessorRow>),
     Fixes { fixes: Vec<Fix>, selected: usize },
+    Source { items: Vec<SourceItem>, selected: usize },
     Rename { input: Entity<TextInput>, position: (u32, u32), _subscription: Subscription },
     Message(String),
 }
@@ -85,6 +108,8 @@ pub(super) struct ActionDialog {
 fn menu_entries(java: bool) -> Vec<Option<(&'static str, Option<&'static str>, EditorCommand, bool)>> {
     use EditorCommand as C;
     vec![
+        Some(("Go to Definition", Some("F12"), C::GoToDefinition, java)),
+        None,
         Some(("Cut", Some("Ctrl+X"), C::Cut, true)),
         Some(("Copy", Some("Ctrl+C"), C::Copy, true)),
         Some(("Paste", Some("Ctrl+V"), C::Paste, true)),
@@ -92,13 +117,7 @@ fn menu_entries(java: bool) -> Vec<Option<(&'static str, Option<&'static str>, E
         Some(("Quick Fix…", Some("Ctrl+."), C::QuickFix, java)),
         Some(("Rename Symbol…", Some("F2"), C::Rename, java)),
         Some(("Refactor…", Some("Ctrl+Shift+R"), C::Refactor, java)),
-        None,
-        Some(("Generate Constructor…", None, C::GenerateConstructor, java)),
-        Some(("Generate Getters and Setters…", None, C::GenerateAccessors, java)),
-        Some(("Generate Getters…", None, C::GenerateGetters, java)),
-        Some(("Generate Setters…", None, C::GenerateSetters, java)),
-        Some(("Generate toString()…", None, C::GenerateToString, java)),
-        Some(("Generate equals() and hashCode()…", None, C::GenerateEqualsHashCode, java)),
+        Some(("Source Action…", Some("Shift+Alt+S"), C::SourceAction, java)),
         None,
         Some(("Organize Imports", Some("Shift+Alt+O"), C::OrganizeImports, java)),
         Some(("Add Missing Imports", None, C::AddMissingImports, java)),
@@ -387,6 +406,11 @@ impl CodeEditorView {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, Vec<Fix>, &mut Context<Self>) + 'static,
     ) {
+        if self.is_pom() {
+            // pom.xml: version fixes the IDE computes itself.
+            let _ = range;
+            return self.pom_version_fixes(&diagnostics, cx, then);
+        }
         let params = self.action_params(range, diagnostics.clone(), Some(&["quickfix"]));
         let actions_rx = self.lsp_request("textDocument/codeAction", params);
         // Unresolved type names and where they end (completion position).
@@ -457,7 +481,7 @@ impl CodeEditorView {
     }
 
     pub(super) fn quick_fix(&mut self, cx: &mut Context<Self>) {
-        if !self.require_lsp(cx) {
+        if !self.is_pom() && !self.require_lsp(cx) {
             return;
         }
         let (line, _) = self.buffer.cursor_line_col();
@@ -483,6 +507,56 @@ impl CodeEditorView {
             };
             this.set_dialog_body(body, cx);
         });
+    }
+
+    /// Source Action… (Shift+Alt+S / Alt+Insert): the built-in generators,
+    /// in VS Code's order, then any other source actions jdtls offers at the
+    /// caret (e.g. "Change modifiers to final where possible").
+    pub(super) fn source_action(&mut self, cx: &mut Context<Self>) {
+        if !self.require_lsp(cx) {
+            return;
+        }
+        use EditorCommand as C;
+        let built_in = |title, shortcut, command| SourceItem::Command { title, shortcut, command };
+        let mut items = vec![
+            built_in("Organize Imports", Some("Shift+Alt+O"), C::OrganizeImports),
+            built_in("Generate Getters…", None, C::GenerateGetters),
+            built_in("Generate Setters…", None, C::GenerateSetters),
+            built_in("Generate Getters and Setters…", None, C::GenerateAccessors),
+            built_in("Generate Constructors…", None, C::GenerateConstructor),
+            built_in("Generate hashCode() and equals()…", None, C::GenerateEqualsHashCode),
+            built_in("Generate toString()…", None, C::GenerateToString),
+            built_in("Override/Implement Methods…", None, C::GenerateOverrides),
+            built_in("Generate Delegate Methods…", None, C::GenerateDelegates),
+        ];
+        let caret = self.caret_range();
+        let params = self.action_params(caret, Vec::new(), Some(&["source"]));
+        let rx = self.lsp_request("textDocument/codeAction", params);
+        self.open_dialog("Source Action", "↑↓ to choose, Enter to run", Value::Null, cx);
+        let Some(rx) = rx else {
+            self.set_dialog_body(DialogBody::Source { items, selected: 0 }, cx);
+            return;
+        };
+        self.on_response(rx, cx, move |this, value, cx| {
+            // Skip what the built-in entries already cover (with a dialog).
+            let covered = ["getter", "setter", "organize imports", "tostring", "hashcode", "constructor"];
+            for action in parse_code_actions(&value) {
+                let lower = action.title.to_lowercase();
+                if covered.iter().any(|c| lower.contains(c)) {
+                    continue;
+                }
+                items.push(SourceItem::Edit(Fix { title: action.title, edits: action.edit }));
+            }
+            this.set_dialog_body(DialogBody::Source { items, selected: 0 }, cx);
+        });
+    }
+
+    fn run_source_item(&mut self, item: SourceItem, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        match item {
+            SourceItem::Command { command, .. } => self.command(command, window, cx),
+            SourceItem::Edit(fix) => self.apply_fix(fix, cx),
+        }
     }
 
     pub(super) fn refactor(&mut self, cx: &mut Context<Self>) {
@@ -567,6 +641,8 @@ impl CodeEditorView {
             EditorCommand::GenerateSetters => ("Generate Setters", "java/resolveUnimplementedAccessors", Some(1)),
             EditorCommand::GenerateToString => ("Generate toString()", "java/checkToStringStatus", None),
             EditorCommand::GenerateEqualsHashCode => ("Generate equals() and hashCode()", "java/checkHashCodeEqualsStatus", None),
+            EditorCommand::GenerateOverrides => ("Override/Implement Methods", "java/listOverridableMethods", None),
+            EditorCommand::GenerateDelegates => ("Generate Delegate Methods", "java/checkDelegateMethodsStatus", None),
             _ => return,
         };
         let mut params = context.clone();
@@ -586,6 +662,8 @@ impl CodeEditorView {
                 EditorCommand::GenerateConstructor => fields_body(PickKind::Constructor, &result, true),
                 EditorCommand::GenerateToString => fields_body(PickKind::ToString, &result, false),
                 EditorCommand::GenerateEqualsHashCode => fields_body(PickKind::EqualsHashCode, &result, true),
+                EditorCommand::GenerateOverrides => overrides_body(&result),
+                EditorCommand::GenerateDelegates => delegates_body(&result),
                 _ => accessors_body(&result),
             };
             if let (Some(dialog), DialogBody::Fields { kind: PickKind::EqualsHashCode, .. }) = (this.dialog.as_mut(), &body)
@@ -653,8 +731,13 @@ impl CodeEditorView {
             "escape" => self.close_dialog(window, cx),
             "enter" => self.confirm_dialog(window, cx),
             "up" | "down" => {
-                if let DialogBody::Fixes { fixes, selected } = &mut dialog.body {
-                    let n = fixes.len().max(1);
+                let list = match &mut dialog.body {
+                    DialogBody::Fixes { fixes, selected } => Some((fixes.len(), selected)),
+                    DialogBody::Source { items, selected } => Some((items.len(), selected)),
+                    _ => None,
+                };
+                if let Some((len, selected)) = list {
+                    let n = len.max(1);
                     *selected = if key == "down" { (*selected + 1) % n } else { (*selected + n - 1) % n };
                     cx.notify();
                 }
@@ -721,7 +804,27 @@ impl CodeEditorView {
                             json!({ "context": context, "fields": chosen, "regenerate": true }),
                         ))
                     }
+                    PickKind::Override | PickKind::Delegate => {
+                        if chosen.is_empty() {
+                            dialog.subtitle = "Pick at least one method".into();
+                            cx.notify();
+                            return;
+                        }
+                        if *kind == PickKind::Override {
+                            Some(("java/addOverridableMethods", json!({ "context": context, "overridableMethods": chosen })))
+                        } else {
+                            Some(("java/generateDelegateMethods", json!({ "context": context, "delegateEntries": chosen })))
+                        }
+                    }
                 }
+            }
+            DialogBody::Source { items, selected } => {
+                let item = items.get(*selected).cloned();
+                self.dialog = None;
+                if let Some(item) = item {
+                    self.run_source_item(item, window, cx);
+                }
+                return;
             }
             DialogBody::Accessors(rows) => {
                 let accessors: Vec<Value> = rows
@@ -1020,11 +1123,50 @@ impl CodeEditorView {
                     );
                 }
             }
+            DialogBody::Source { items, selected } => {
+                for (i, item) in items.iter().enumerate() {
+                    let item_clone = item.clone();
+                    let shortcut = match item {
+                        SourceItem::Command { shortcut, .. } => *shortcut,
+                        SourceItem::Edit(_) => None,
+                    };
+                    body = body.child(
+                        div()
+                            .id(("dialog-source", i))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_color(theme.foreground)
+                            .when(i == *selected, |r| r.bg(theme.accent.opacity(0.25)))
+                            .hover(|s| s.bg(theme.accent.opacity(0.14)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(div().text_color(theme.foreground_muted).child("▤"))
+                                    .child(item.title().to_string()),
+                            )
+                            .children(shortcut.map(|s| div().text_size(px(11. * z)).text_color(theme.foreground_muted).child(s)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dialog = None;
+                                this.run_source_item(item_clone.clone(), window, cx);
+                            })),
+                    );
+                }
+            }
         }
 
         let ok_label = match &dialog.body {
             DialogBody::Message(_) => "Close",
             DialogBody::Fixes { .. } => "Apply",
+            DialogBody::Source { .. } => "Run",
             DialogBody::Rename { .. } => "Rename",
             _ if dialog.busy => "Working…",
             _ => "Generate",
@@ -1111,6 +1253,62 @@ fn fields_body(kind: PickKind, result: &Value, fields_only: bool) -> DialogBody 
     // no-arg one for a plain class).
     let extra = result["constructors"].as_array().and_then(|c| c.first().cloned()).map(|c| json!([c])).unwrap_or(json!([]));
     DialogBody::Fields { kind, rows, extra }
+}
+
+/// `name(String, int)` from a jdtls method entry.
+fn method_signature(method: &Value) -> String {
+    let params: Vec<&str> = method["parameters"]
+        .as_array()
+        .map(|p| p.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    format!("{}({})", method["name"].as_str().unwrap_or("?"), params.join(", "))
+}
+
+/// Override/Implement: every overridable method, grouped by the type that
+/// declares it; abstract ones the class must implement start ticked.
+fn overrides_body(result: &Value) -> DialogBody {
+    let mut rows: Vec<PickRow> = result["methods"]
+        .as_array()
+        .map(|methods| {
+            methods
+                .iter()
+                .map(|m| {
+                    let unimplemented = m["unimplemented"].as_bool() == Some(true);
+                    PickRow {
+                        label: method_signature(m),
+                        detail: format!(
+                            "{}{}",
+                            m["declaringClass"].as_str().unwrap_or(""),
+                            if unimplemented { " · must implement" } else { "" }
+                        ),
+                        checked: unimplemented,
+                        raw: m.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Must-implement first, then by declaring type.
+    rows.sort_by(|a, b| b.checked.cmp(&a.checked).then(a.detail.cmp(&b.detail)));
+    DialogBody::Fields { kind: PickKind::Override, rows, extra: Value::Null }
+}
+
+/// Delegate Methods: one row per (field, method) pair.
+fn delegates_body(result: &Value) -> DialogBody {
+    let mut rows = Vec::new();
+    for entry in result["delegateFields"].as_array().into_iter().flatten() {
+        let field = &entry["field"];
+        let field_name = field["name"].as_str().unwrap_or("?");
+        for method in entry["delegateMethods"].as_array().into_iter().flatten() {
+            rows.push(PickRow {
+                label: format!("{field_name}.{}", method_signature(method)),
+                detail: field["type"].as_str().unwrap_or("").to_string(),
+                checked: false,
+                raw: json!({ "field": field, "delegateMethod": method }),
+            });
+        }
+    }
+    DialogBody::Fields { kind: PickKind::Delegate, rows, extra: Value::Null }
 }
 
 fn accessors_body(result: &Value) -> DialogBody {

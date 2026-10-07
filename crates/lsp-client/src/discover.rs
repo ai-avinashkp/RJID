@@ -14,15 +14,31 @@ pub struct JdtlsInstall {
     pub server_dir: PathBuf,
 }
 
-fn is_server_dir(dir: &Path) -> bool {
-    dir.join("plugins").is_dir() && shared_config_dir(dir).is_dir()
+/// Whether `dir` is a usable jdtls server folder: plugins with the Equinox
+/// launcher, and the shared configuration for this OS.
+pub fn is_server_dir(dir: &Path) -> bool {
+    dir.join("plugins").is_dir() && shared_config_dir(dir).is_dir() && find_equinox_launcher(dir).is_some()
 }
 
 pub fn discover_jdtls() -> Option<JdtlsInstall> {
+    discover_jdtls_with(None)
+}
+
+/// Like [`discover_jdtls`], also checking a copy the IDE downloaded itself
+/// (`managed`), after `JDTLS_HOME` and before editor extensions.
+pub fn discover_jdtls_with(managed: Option<&Path>) -> Option<JdtlsInstall> {
     if let Some(dir) = std::env::var_os("JDTLS_HOME").map(PathBuf::from)
         && is_server_dir(&dir)
     {
         return Some(JdtlsInstall { server_dir: dir });
+    }
+    if let Some(dir) = managed.filter(|d| is_server_dir(d)) {
+        return Some(JdtlsInstall { server_dir: dir.to_path_buf() });
+    }
+    // Lets the first-run download flow be tried on a machine that has an
+    // editor's copy (as a new user without one would see it).
+    if std::env::var_os("RJID_NO_EDITOR_JDTLS").is_some() {
+        return None;
     }
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)?;
     let mut candidates: Vec<PathBuf> = [".vscode", ".vscode-insiders", ".vscode-oss", ".cursor"]

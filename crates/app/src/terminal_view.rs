@@ -14,7 +14,6 @@ use rji_terminal::{CellStyle, Emulator, PtySession, SelectKind, TermColor, defau
 use rji_theme::Theme;
 
 const LINE_HEIGHT: f32 = 18.0;
-const FONT_SIZE: f32 = 13.0;
 const PADDING: f32 = 6.0;
 pub const HEADER_HEIGHT: f32 = 26.0;
 
@@ -41,6 +40,15 @@ pub struct TerminalView {
     shell_started: bool,
     /// Input sent before the shell started (a Run command), flushed then.
     pending_input: Vec<u8>,
+    /// Bumped on every shell start, so a finished reader for an older
+    /// shell (after Restart) can't mark the new one as exited.
+    shell_generation: u64,
+    /// Draw the built-in header. The window hides it and draws one shared
+    /// header with the terminal tabs instead.
+    pub show_header: bool,
+    /// Terminal font (Theme & Fonts); size is before UI zoom.
+    pub font_family: gpui::SharedString,
+    pub font_size: f32,
 }
 
 /// Panel heights below this many rows are transient layout states (the
@@ -55,6 +63,11 @@ pub enum TerminalEvent {
     ServerStarted(u16),
     /// A server couldn't start because its port is taken.
     PortInUse(u16),
+    /// The shell exited on its own (`exit`): the window closes this tab.
+    Exited,
+    /// A Maven/Gradle build (or a Spring Boot start) finished: `true` =
+    /// success, `false` = failure.
+    BuildFinished(bool),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -74,12 +87,18 @@ impl TerminalView {
             output_tail: String::new(),
             shell_started: false,
             pending_input: Vec::new(),
+            shell_generation: 0,
+            show_header: true,
+            font_family: crate::fonts::MONO.into(),
+            font_size: rji_settings::DEFAULT_TERMINAL_FONT_SIZE,
         };
         // No shell yet: `fit_to` starts it once the panel has a real size.
         view
     }
 
     fn start_shell(&mut self, cx: &mut Context<Self>) {
+        self.shell_generation += 1;
+        let generation = self.shell_generation;
         match PtySession::spawn(&default_shell(), &[], &self.cwd) {
             Ok(session) => {
                 let _ = session.resize(self.emulator.lines() as u16, self.emulator.columns() as u16);
@@ -109,11 +128,16 @@ impl TerminalView {
                             break;
                         }
                     }
-                    // The shell exited on its own (e.g. `exit`).
+                    // The shell exited on its own (e.g. `exit`) — unless this
+                    // reader belongs to a shell that Restart already replaced.
                     this.update(cx, |view, cx| {
+                        if view.shell_generation != generation {
+                            return;
+                        }
                         view.session = None;
                         view.emulator
                             .feed(b"\r\n\x1b[2m[process exited \xe2\x80\x94 press Restart to start a new shell]\x1b[0m\r\n");
+                        cx.emit(TerminalEvent::Exited);
                         cx.notify();
                     })
                     .ok();
@@ -127,9 +151,21 @@ impl TerminalView {
         }
     }
 
+    /// Whether the view is scrolled back into history (the header offers
+    /// "↓ Latest" then).
+    pub fn is_scrolled_up(&self) -> bool {
+        self.emulator.screen().display_offset > 0
+    }
+
+    pub fn scroll_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.emulator.scroll_to_bottom();
+        cx.notify();
+    }
+
     pub fn restart(&mut self, cx: &mut Context<Self>) {
         // Dropping the old session kills its shell.
         self.session = None;
+        self.shell_started = true;
         let (cols, lines) = (self.emulator.columns(), self.emulator.lines());
         self.emulator = Emulator::new(cols, lines);
         self.start_shell(cx);
@@ -172,7 +208,11 @@ impl TerminalView {
             return Vec::new();
         };
         let complete: String = self.output_tail.drain(..=last_newline).collect();
-        complete.lines().filter_map(server_event).collect()
+        complete
+            .lines()
+            .flat_map(|line| [server_event(line), build_event(line)])
+            .flatten()
+            .collect()
     }
 
     /// Sends literal text to the shell as if typed — used by Run/Build.
@@ -207,7 +247,7 @@ impl TerminalView {
     }
 
     fn line_height(&self) -> f32 {
-        LINE_HEIGHT * self.zoom
+        (self.font_size * LINE_HEIGHT / rji_settings::DEFAULT_TERMINAL_FONT_SIZE).round() * self.zoom
     }
 
     /// Screen (row, column) under a window position, and whether it's on
@@ -379,8 +419,7 @@ impl TerminalView {
 }
 
 fn is_light(theme: Theme) -> bool {
-    let bg: Hsla = theme.background.into();
-    bg.l > 0.5
+    theme.kind.is_light()
 }
 
 /// A readable 16-color ANSI palette (darker variants on light themes).
@@ -406,12 +445,12 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let focused = self.focus_handle.is_focused(window);
-        let font_size = px(FONT_SIZE * self.zoom);
+        let font_size = px(self.font_size * self.zoom);
         let line_h = self.line_height();
 
         // Real monospace cell width at this size, for cursor placement,
         // hit-testing, and sizing the grid to the panel.
-        let mono = font(crate::fonts::MONO);
+        let mono = font(self.font_family.clone());
         let text_system = window.text_system();
         let font_id = text_system.resolve_font(&mono);
         if let Ok(advance) = text_system.advance(font_id, font_size, 'm') {
@@ -463,15 +502,30 @@ impl Render for TerminalView {
             .child(header_button("term-restart", "Restart", theme).on_click(cx.listener(|this, _, _, cx| this.restart(cx))));
 
         let cell_width = self.cell_width;
+        let this = &*self;
         let rows = screen.rows.iter().map(|runs| {
+            // Success / warning / failure lines are tinted, but only where the
+            // program didn't pick a color itself.
+            let line: String = runs.iter().map(|r| r.text.as_str()).collect();
+            let tone = line_tone(&line).map(|tone| match tone {
+                Tone::Success => theme.success,
+                Tone::Warning => theme.warning,
+                Tone::Failure => theme.error,
+            });
             div()
                 .flex()
                 .flex_row()
                 .h(px(line_h))
                 .whitespace_nowrap()
-                .children(runs.iter().map(|run| {
+                .children(runs.iter().map(move |run| {
                     let style = &run.style;
-                    let (fg, bg) = (self.color(style.fg, style), self.color(style.bg, style));
+                    let (mut fg, bg) = (this.color(style.fg, style), this.color(style.bg, style));
+                    if let Some(tone) = tone
+                        && style.fg == TermColor::DefaultFg
+                        && !style.selected
+                    {
+                        fg = tone.into();
+                    }
                     // Exactly as wide as its cells, so what's drawn lines up with
                     // the mouse's cell math (fallback glyphs can be wider).
                     div()
@@ -524,7 +578,7 @@ impl Render for TerminalView {
             .min_h_0()
             .overflow_hidden()
             .pl(px(PADDING))
-            .font_family(crate::fonts::MONO)
+            .font_family(self.font_family.clone())
             .text_size(font_size)
             .line_height(px(line_h))
             .cursor_text()
@@ -569,7 +623,7 @@ impl Render for TerminalView {
             .size_full()
             .bg(theme.surface)
             .text_color(theme.foreground)
-            .child(header)
+            .when(self.show_header, |t| t.child(header))
             .child(body)
     }
 }
@@ -629,6 +683,69 @@ fn strip_escapes(text: &str) -> String {
 /// - `Tomcat started on port(s): 8080 (http)` (Boot 2)
 /// - `Netty started on port 8080`, Jetty, Undertow
 /// - `Port 8080 was already in use.`
+/// How a line of output reads, for coloring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Success,
+    Warning,
+    Failure,
+}
+
+/// Classifies build/run output (Maven, Gradle, javac, Spring Boot, JUnit,
+/// stack traces). Only text the program left uncolored gets this color.
+pub fn line_tone(line: &str) -> Option<Tone> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // JUnit / Surefire summaries: success only without failures or errors.
+    if trimmed.contains("Tests run:") {
+        let clean = trimmed.contains("Failures: 0") && trimmed.contains("Errors: 0");
+        return Some(if clean { Tone::Success } else { Tone::Failure });
+    }
+    const FAILURE: &[&str] = &[
+        "BUILD FAILURE",
+        "BUILD FAILED",
+        "[ERROR]",
+        "APPLICATION FAILED TO START",
+        "FAILURE!",
+        "Exception in thread",
+        "Caused by:",
+        "Could not find or load main class",
+        "error: ",
+        ": error:",
+        " ERROR ",
+        "FAILED",
+    ];
+    let stack_frame = trimmed.starts_with("at ") && trimmed.ends_with(')') && trimmed.contains('(');
+    let exception_line = trimmed.split_whitespace().next().is_some_and(|w| {
+        let w = w.trim_end_matches(':');
+        (w.ends_with("Exception") || w.ends_with("Error")) && w.contains('.')
+    });
+    if stack_frame || exception_line || FAILURE.iter().any(|f| trimmed.contains(f)) {
+        return Some(Tone::Failure);
+    }
+    if ["[WARNING]", " WARN ", "warning:"].iter().any(|w| trimmed.contains(w)) {
+        return Some(Tone::Warning);
+    }
+    let spring_started = trimmed.contains("Started ") && trimmed.contains(" seconds");
+    if trimmed.contains("BUILD SUCCESS") || spring_started || trimmed.contains("started on port") {
+        return Some(Tone::Success);
+    }
+    None
+}
+
+/// A build's (or Spring Boot start's) final verdict line.
+fn build_event(line: &str) -> Option<TerminalEvent> {
+    if line.contains("BUILD SUCCESS") {
+        Some(TerminalEvent::BuildFinished(true))
+    } else if line.contains("BUILD FAILURE") || line.contains("BUILD FAILED") || line.contains("APPLICATION FAILED TO START") {
+        Some(TerminalEvent::BuildFinished(false))
+    } else {
+        None
+    }
+}
+
 fn server_event(line: &str) -> Option<TerminalEvent> {
     let lower = line.to_ascii_lowercase();
     if let Some(at) = lower.find(" started on port") {
@@ -664,6 +781,26 @@ mod tests {
             Some(TerminalEvent::PortInUse(8080))
         );
         assert_eq!(server_event("Started Application in 0.98 seconds"), None);
+    }
+
+    #[test]
+    fn tones_build_and_run_output() {
+        assert_eq!(line_tone("[INFO] BUILD SUCCESS"), Some(Tone::Success));
+        assert_eq!(line_tone("BUILD SUCCESSFUL in 4s"), Some(Tone::Success));
+        assert_eq!(line_tone("[INFO] BUILD FAILURE"), Some(Tone::Failure));
+        assert_eq!(line_tone("[ERROR] Failed to execute goal org.apache.maven.plugins"), Some(Tone::Failure));
+        assert_eq!(line_tone("[WARNING] Using platform encoding"), Some(Tone::Warning));
+        assert_eq!(line_tone("Tests run: 3, Failures: 0, Errors: 0, Skipped: 0"), Some(Tone::Success));
+        assert_eq!(line_tone("Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"), Some(Tone::Failure));
+        assert_eq!(line_tone("Exception in thread \"main\" java.lang.NullPointerException"), Some(Tone::Failure));
+        assert_eq!(line_tone("java.lang.IllegalStateException: boom"), Some(Tone::Failure));
+        assert_eq!(line_tone("        at com.example.App.main(App.java:12)"), Some(Tone::Failure));
+        assert_eq!(line_tone("App.java:5: error: ';' expected"), Some(Tone::Failure));
+        assert_eq!(line_tone("> Task :test FAILED"), Some(Tone::Failure));
+        assert_eq!(line_tone("Started Application in 1.066 seconds (process running for 1.3)"), Some(Tone::Success));
+        assert_eq!(line_tone("Hello, Ada!"), None);
+        assert_eq!(line_tone(r"PS C:\projects\boot> java -cp out Main"), None);
+        assert_eq!(build_event("[INFO] BUILD FAILURE"), Some(TerminalEvent::BuildFinished(false)));
     }
 
     #[test]

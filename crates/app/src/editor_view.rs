@@ -32,6 +32,9 @@ use rji_theme::Theme;
 mod code_actions;
 mod find;
 mod hover;
+mod navigation;
+pub use navigation::Location;
+mod pom_fixes;
 
 use find::{FindBar, FindMode};
 
@@ -93,6 +96,8 @@ pub struct CodeEditorView {
     pub auto_import: bool,
     /// Unresolved names the last automatic import attempt was for.
     last_auto_import: String,
+    /// Missing-version problems the last automatic pom fix was for.
+    last_pom_fix: String,
     /// 0-based lines with a breakpoint, toggled by clicking the gutter.
     /// `RootView` reads this when starting a debug session.
     pub breakpoints: std::collections::BTreeSet<u32>,
@@ -118,6 +123,17 @@ pub struct CodeEditorView {
     /// UI zoom factor (Ctrl+=/-), set by `RootView`; row heights scale
     /// with it so zoomed text never overflows its line.
     pub zoom: f32,
+    /// Library / JDK source opened by Go to Definition: viewable, not editable.
+    pub read_only: bool,
+    /// Code font (Theme & Fonts); sizes are before UI zoom.
+    pub font_family: gpui::SharedString,
+    pub font_size: f32,
+    /// Ctrl+hover link underline (see `navigation`).
+    ctrl_link: Option<navigation::CtrlLink>,
+    ctrl_link_generation: u64,
+    /// Line and position of the last mouse move over the text, so pressing
+    /// Ctrl without moving can show the link.
+    last_pointer: Option<(usize, Point<Pixels>)>,
 }
 
 impl CodeEditorView {
@@ -163,6 +179,7 @@ impl CodeEditorView {
             dialog: None,
             auto_import: true,
             last_auto_import: String::new(),
+            last_pom_fix: String::new(),
             breakpoints: std::collections::BTreeSet::new(),
             paused_line: None,
             line_layouts: HashMap::new(),
@@ -174,6 +191,12 @@ impl CodeEditorView {
             completion: None,
             find: None,
             zoom: 1.0,
+            read_only: false,
+            font_family: crate::fonts::MONO.into(),
+            font_size: rji_settings::DEFAULT_EDITOR_FONT_SIZE,
+            ctrl_link: None,
+            ctrl_link_generation: 0,
+            last_pointer: None,
         };
         view.recompute_line_states();
         view
@@ -189,8 +212,9 @@ impl CodeEditorView {
         }
     }
 
+    /// Row height: ~1.43× the font size (20 px at the default 14 px).
     fn line_height(&self) -> f32 {
-        LINE_HEIGHT * self.zoom
+        (self.font_size * LINE_HEIGHT / rji_settings::DEFAULT_EDITOR_FONT_SIZE).round() * self.zoom
     }
 
     pub fn text(&self) -> &str {
@@ -340,14 +364,25 @@ impl CodeEditorView {
             }
         }
         self.maybe_auto_import(cx);
+        self.maybe_fix_pom_versions(cx);
     }
 
     /// Call after every buffer mutation: refreshes the dirty flag and
     /// tells the language server (best-effort — an LSP hiccup must never
     /// break editing).
     fn after_edit(&mut self) {
+        if self.read_only {
+            // Every edit path ends here: put the text back, keep the caret.
+            let cursor = self.buffer.cursor().min(self.saved_text.len());
+            self.buffer = TextBuffer::new(self.saved_text.clone());
+            self.buffer.set_cursor(cursor, false);
+            self.dirty = false;
+            self.recompute_line_states();
+            return;
+        }
         self.edit_version += 1;
         self.clear_hover();
+        self.ctrl_link = None;
         self.dirty = self.buffer.text() != self.saved_text;
         self.recompute_line_states();
         self.recompute_matches();
@@ -362,7 +397,10 @@ impl CodeEditorView {
 
     /// Never panics on an I/O error — the dirty marker just stays set so
     /// the failure is visible instead of silently losing the save.
-    pub fn save(&mut self) {
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let on_disk = if self.crlf {
             std::borrow::Cow::Owned(self.buffer.text().replace('\n', "\r\n"))
         } else {
@@ -376,6 +414,7 @@ impl CodeEditorView {
             {
                 hook.trigger();
             }
+            cx.emit(EditorEvent::Saved);
         }
     }
 
@@ -622,10 +661,6 @@ impl CodeEditorView {
                 let (line, _) = self.buffer.cursor_line_col();
                 self.buffer.select_line(line);
             }
-            EditorCommand::SelectWord => {
-                let cursor = self.buffer.cursor();
-                self.buffer.select_word_at(cursor);
-            }
             EditorCommand::ToggleComment => {
                 self.buffer.toggle_line_comment();
                 edited = true;
@@ -650,6 +685,10 @@ impl CodeEditorView {
             EditorCommand::Find => return self.open_find(FindMode::Find, false, window, cx),
             EditorCommand::Replace => return self.open_find(FindMode::Find, true, window, cx),
             EditorCommand::GoToLine => return self.open_find(FindMode::GoToLine, false, window, cx),
+            EditorCommand::GoToDefinition => {
+                let offset = self.buffer.cursor();
+                return self.go_to_definition(offset, cx);
+            }
             EditorCommand::QuickFix => return self.quick_fix(cx),
             EditorCommand::Rename => return self.rename_symbol(window, cx),
             EditorCommand::Refactor => return self.refactor(cx),
@@ -661,7 +700,10 @@ impl CodeEditorView {
             | EditorCommand::GenerateGetters
             | EditorCommand::GenerateSetters
             | EditorCommand::GenerateToString
-            | EditorCommand::GenerateEqualsHashCode => return self.generate(command, cx),
+            | EditorCommand::GenerateEqualsHashCode
+            | EditorCommand::GenerateOverrides
+            | EditorCommand::GenerateDelegates => return self.generate(command, cx),
+            EditorCommand::SourceAction => return self.source_action(cx),
             EditorCommand::ContextMenu => return self.open_context_menu_at_caret(cx),
             EditorCommand::FindNext | EditorCommand::FindPrevious => {
                 if self.find.as_ref().is_none_or(|bar| bar.mode != FindMode::Find) {
@@ -718,12 +760,14 @@ impl CodeEditorView {
             "g" if ctrl => Some(EditorCommand::GoToLine),
             "f3" if shift => Some(EditorCommand::FindPrevious),
             "f3" => Some(EditorCommand::FindNext),
+            "f12" if !ctrl && !shift => Some(EditorCommand::GoToDefinition),
             "." if ctrl => Some(EditorCommand::QuickFix),
             "f2" if !ctrl && !alt => Some(EditorCommand::Rename),
             "o" if shift && alt => Some(EditorCommand::OrganizeImports),
             "f" if shift && alt => Some(EditorCommand::FormatDocument),
             "r" if ctrl && shift => Some(EditorCommand::Refactor),
-            "insert" if alt => Some(EditorCommand::ContextMenu),
+            "insert" if alt => Some(EditorCommand::SourceAction),
+            "s" if shift && alt => Some(EditorCommand::SourceAction),
             "f10" if shift => Some(EditorCommand::ContextMenu),
             _ => None,
         };
@@ -826,7 +870,7 @@ impl CodeEditorView {
                 let cursor = self.buffer.cursor();
                 self.buffer.set_cursor(cursor, false);
             }
-            "s" if ctrl && !shift => self.save(), // Ctrl+Shift+S (save all) is RootView's
+            "s" if ctrl && !shift => self.save(cx), // Ctrl+Shift+S (save all) is RootView's
             k if ctrl => {
                 let command = match (k, shift) {
                     ("space", _) => EditorCommand::Completion,
@@ -888,6 +932,13 @@ impl CodeEditorView {
         self.completion = None;
         self.clear_hover();
         let offset = self.offset_at(line, event.position);
+        // Ctrl+Click (Cmd+Click on macOS): Go to Definition.
+        if (event.modifiers.control || event.modifiers.platform) && event.click_count == 1 && !event.modifiers.shift {
+            self.buffer.set_cursor(offset, false);
+            self.go_to_definition(offset, cx);
+            cx.notify();
+            return;
+        }
         match event.click_count {
             2 => self.buffer.select_word_at(offset),
             3 => self.buffer.select_line(line),
@@ -902,6 +953,9 @@ impl CodeEditorView {
     fn on_line_mouse_move(&mut self, line: usize, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if !self.drag_selecting {
             if event.pressed_button.is_none() {
+                self.last_pointer = Some((line, event.position));
+                let ctrl = event.modifiers.control || event.modifiers.platform;
+                self.update_ctrl_link(line, event.position, ctrl, cx);
                 self.on_text_hover(line, event.position, cx);
             }
             return;
@@ -930,7 +984,6 @@ pub enum EditorCommand {
     Paste,
     SelectAll,
     SelectLine,
-    SelectWord,
     ToggleComment,
     DuplicateLine,
     Indent,
@@ -953,6 +1006,11 @@ pub enum EditorCommand {
     GenerateSetters,
     GenerateToString,
     GenerateEqualsHashCode,
+    GenerateOverrides,
+    GenerateDelegates,
+    /// The Source Action list (generate, organize imports, ...).
+    SourceAction,
+    GoToDefinition,
     /// The right-click menu, at the caret (Alt+Insert, Shift+F10).
     ContextMenu,
 }
@@ -961,10 +1019,14 @@ pub enum EditorCommand {
 pub enum EditorEvent {
     /// A gutter click added or removed a breakpoint.
     BreakpointsChanged,
+    /// The file was written to disk.
+    Saved,
     /// A short message for the status area.
     Notice(String),
     /// Language-server edits to other files (rename, "create class").
     ExternalEdits(Vec<rji_lsp_client::FileEdit>),
+    /// Go to Definition landed in another file (project or library).
+    OpenLocation(Location),
 }
 
 impl gpui::EventEmitter<EditorEvent> for CodeEditorView {}
@@ -1080,6 +1142,7 @@ impl CodeEditorView {
             selection: line_selection,
             matches: self.match_spans_on_line(range.clone()),
             underlines: self.diagnostic_underlines(line_idx, line_text, theme),
+            link: self.ctrl_link_on_line(range.clone()),
             line_height: line_h,
             theme,
         };
@@ -1168,6 +1231,7 @@ impl Render for CodeEditorView {
         };
 
         let find_bar = self.render_find_bar(cx);
+        let this_link_valid = self.ctrl_link.as_ref().is_some_and(|l| l.valid);
         let hover = self.render_hover(viewport_w, viewport_h, theme, cx);
         let context_menu = self.render_context_menu(viewport_w, viewport_h, theme, cx);
         let dialog = self.render_dialog(viewport_w, theme, cx);
@@ -1205,11 +1269,25 @@ impl Render for CodeEditorView {
                 }),
             )
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if !*hovered {
+                    this.last_pointer = None;
+                    this.clear_ctrl_link(cx);
+                }
                 if !*hovered && (this.hover.is_some() || this.hover_pending.is_some()) {
                     this.clear_hover();
                     cx.notify();
                 }
             }))
+            // Pressing / releasing Ctrl without moving the mouse.
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _window, cx| {
+                let ctrl = event.modifiers.control || event.modifiers.platform;
+                match this.last_pointer {
+                    Some((line, position)) => this.update_ctrl_link(line, position, ctrl, cx),
+                    None => this.clear_ctrl_link(cx),
+                }
+            }))
+            // A hand over a navigable name while Ctrl is held.
+            .when(this_link_valid, |d| d.cursor_pointer())
             .on_scroll_wheel(cx.listener(|this, _: &gpui::ScrollWheelEvent, _window, cx| {
                 if this.hover.is_some() || this.hover_pending.is_some() {
                     this.clear_hover();
@@ -1218,7 +1296,8 @@ impl Render for CodeEditorView {
             }))
             .size_full()
             .min_w_0()
-            .font_family(crate::fonts::MONO)
+            .font_family(self.font_family.clone())
+            .text_size(px(self.font_size * self.zoom))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
@@ -1286,6 +1365,8 @@ struct CodeLineElement {
     matches: Vec<(usize, usize, bool)>,
     /// Diagnostic ranges on this line: `(start, end)` byte columns + color.
     underlines: Vec<(usize, usize, Rgba)>,
+    /// Ctrl+hover link underline: `(start, end)` byte columns.
+    link: Option<(usize, usize)>,
     line_height: f32,
     theme: Theme,
 }
@@ -1453,6 +1534,13 @@ impl Element for CodeLineElement {
             .ok();
         if let Some(caret) = prepaint.caret.take() {
             window.paint_quad(caret);
+        }
+        // Ctrl+hover: a solid link underline under the navigable name.
+        if let Some((start, end)) = self.link {
+            let x0 = bounds.left() + shaped.x_for_index(start);
+            let x1 = bounds.left() + shaped.x_for_index(end.min(shaped.len));
+            let y = bounds.top() + px(self.line_height - 2.5);
+            window.paint_quad(fill(Bounds::new(point(x0, y), size(x1 - x0, px(1.5))), self.theme.accent));
         }
         // Squiggly underline under each diagnostic range.
         let step = 2.0_f32;

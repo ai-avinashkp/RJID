@@ -33,7 +33,6 @@ const DROPDOWN_WIDTH: f32 = 290.0;
 pub(super) enum MenuId {
     File,
     Edit,
-    Selection,
     View,
     Go,
     Run,
@@ -45,10 +44,9 @@ pub(super) enum MenuId {
 }
 
 impl MenuId {
-    const BAR: [MenuId; 9] = [
+    pub(super) const BAR: [MenuId; 8] = [
         MenuId::File,
         MenuId::Edit,
-        MenuId::Selection,
         MenuId::View,
         MenuId::Go,
         MenuId::Run,
@@ -57,11 +55,10 @@ impl MenuId {
         MenuId::Help,
     ];
 
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             MenuId::File => "File",
             MenuId::Edit => "Edit",
-            MenuId::Selection => "Selection",
             MenuId::View => "View",
             MenuId::Go => "Go",
             MenuId::Run => "Run",
@@ -77,7 +74,6 @@ impl MenuId {
         Some(match key {
             "f" => MenuId::File,
             "e" => MenuId::Edit,
-            "s" => MenuId::Selection,
             "v" => MenuId::View,
             "g" => MenuId::Go,
             "r" => MenuId::Run,
@@ -91,6 +87,8 @@ impl MenuId {
 
 #[derive(Clone, Debug)]
 pub(super) enum MenuAction {
+    GoToFile,
+    CommandPalette,
     NewProject,
     OpenFolder,
     OpenFolderInNewWindow,
@@ -100,6 +98,7 @@ pub(super) enum MenuAction {
     NewFolder,
     Save,
     SaveAll,
+    ToggleAutoSave,
     CloseTab,
     Exit,
     Editor(EditorCommand),
@@ -110,14 +109,13 @@ pub(super) enum MenuAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
-    NextTheme,
+    Appearance,
     RefreshTree,
     NextTab,
     PreviousTab,
     Run,
     RunCommand(String),
     Debug,
-    DebugCommand(String),
     AttachDebugger,
     Continue,
     Step(StepDepth),
@@ -125,15 +123,17 @@ pub(super) enum MenuAction {
     AddRunConfig,
     AndroidDevices,
     FocusTerminal,
+    NewTerminal,
+    CloseTerminal,
     ClearTerminal,
     RestartTerminal,
-    RunPlugin(usize, String),
     ManagePlugins,
     InstallPluginFromFolder,
     OpenPluginsFolder,
     ReloadPlugins,
     Shortcuts,
     CheckUpdates,
+    InstallJdtls,
     About,
 }
 
@@ -167,7 +167,7 @@ fn item_if(enabled: bool, label: impl Into<String>, shortcut: Option<&'static st
 }
 
 impl RootView {
-    fn menu_entries(&self, menu: MenuId) -> Vec<MenuEntry> {
+    pub(super) fn menu_entries(&self, menu: MenuId) -> Vec<MenuEntry> {
         use MenuAction as A;
         let has_editor = self.active_tab.is_some();
         let has_workspace = self.workspace_root.is_some();
@@ -206,6 +206,11 @@ impl RootView {
                     MenuEntry::Separator,
                     item_if(has_editor, "Save", Some("Ctrl+S"), A::Save),
                     item_if(has_editor, "Save All", Some("Ctrl+Shift+S"), A::SaveAll),
+                    item(
+                        if self.app_settings.auto_save { "✓ Auto Save (on focus change)" } else { "Auto Save (on focus change)" },
+                        None,
+                        A::ToggleAutoSave,
+                    ),
                     MenuEntry::Separator,
                     item_if(has_editor, "Close Tab", Some("Ctrl+W"), A::CloseTab),
                     item("Exit", Some("Alt+F4"), A::Exit),
@@ -219,6 +224,7 @@ impl RootView {
                 item_if(has_editor, "Cut", Some("Ctrl+X"), e(EditorCommand::Cut)),
                 item_if(has_editor, "Copy", Some("Ctrl+C"), e(EditorCommand::Copy)),
                 item_if(has_editor, "Paste", Some("Ctrl+V"), e(EditorCommand::Paste)),
+                item_if(has_editor, "Select All", Some("Ctrl+A"), e(EditorCommand::SelectAll)),
                 MenuEntry::Separator,
                 item_if(has_editor, "Find", Some("Ctrl+F"), e(EditorCommand::Find)),
                 item_if(has_editor, "Replace", Some("Ctrl+H"), e(EditorCommand::Replace)),
@@ -231,18 +237,7 @@ impl RootView {
                 item_if(has_editor, "Outdent", Some("Shift+Tab"), e(EditorCommand::Outdent)),
                 MenuEntry::Separator,
                 item_if(has_editor, "Code Completion", Some("Ctrl+Space"), e(EditorCommand::Completion)),
-                MenuEntry::Header("Code".into()),
-                item_if(has_editor, "Quick Fix…", Some("Ctrl+."), e(EditorCommand::QuickFix)),
-                item_if(has_editor, "Rename Symbol…", Some("F2"), e(EditorCommand::Rename)),
-                item_if(has_editor, "Refactor…", Some("Ctrl+Shift+R"), e(EditorCommand::Refactor)),
-                item_if(has_editor, "Generate…", Some("Alt+Insert"), e(EditorCommand::ContextMenu)),
-                item_if(has_editor, "Organize Imports", Some("Shift+Alt+O"), e(EditorCommand::OrganizeImports)),
-                item_if(has_editor, "Format Document", Some("Shift+Alt+F"), e(EditorCommand::FormatDocument)),
-            ],
-            MenuId::Selection => vec![
-                item_if(has_editor, "Select All", Some("Ctrl+A"), e(EditorCommand::SelectAll)),
-                item_if(has_editor, "Select Line", Some("Ctrl+L"), e(EditorCommand::SelectLine)),
-                item_if(has_editor, "Select Word", None, e(EditorCommand::SelectWord)),
+
             ],
             MenuId::View => vec![
                 item(
@@ -272,9 +267,13 @@ impl RootView {
                 item("Zoom Out", Some("Ctrl+-"), A::ZoomOut),
                 item("Reset Zoom", Some("Ctrl+0"), A::ZoomReset),
                 MenuEntry::Separator,
-                item(format!("Next Theme ({})", self.theme().kind.display_name()), None, A::NextTheme),
+                item(format!("Theme & Fonts… ({})", self.theme().kind.display_name()), None, A::Appearance),
             ],
             MenuId::Go => vec![
+                item_if(has_editor, "Go to Definition", Some("F12 / Ctrl+Click"), e(EditorCommand::GoToDefinition)),
+                item_if(has_workspace, "Go to File…", Some("Ctrl+P"), A::GoToFile),
+                item("Command Palette…", Some("Ctrl+Shift+P"), A::CommandPalette),
+                MenuEntry::Separator,
                 item_if(has_editor, "Go to Line…", Some("Ctrl+G"), e(EditorCommand::GoToLine)),
                 MenuEntry::Separator,
                 item_if(self.tabs.len() > 1, "Next Tab", Some("Ctrl+Tab"), A::NextTab),
@@ -282,31 +281,18 @@ impl RootView {
             ],
             MenuId::Run => self.run_menu_entries(),
             MenuId::Terminal => vec![
+                item("New Terminal", Some("Ctrl+Shift+`"), A::NewTerminal),
                 item("Focus Terminal", None, A::FocusTerminal),
+                MenuEntry::Separator,
                 item("Clear", Some("Ctrl+L"), A::ClearTerminal),
                 item("Restart Shell", None, A::RestartTerminal),
+                item_if(!self.terminals.is_empty(), "Close Terminal", Some("exit"), A::CloseTerminal),
             ],
             MenuId::Plugins => {
-                // Plugin commands act on the open file, so they're listed only
-                // while one is open (instead of a block of greyed-out items).
-                let commands = self.plugin_commands();
+                // Plugin commands are run from Manage Plugins (one button per
+                // command), keeping this menu to plugin management.
                 let mut entries: Vec<MenuEntry> = Vec::new();
-                if commands.is_empty() {
-                    entries.push(MenuEntry::Header("No plugins installed".into()));
-                } else if !has_editor {
-                    entries.push(MenuEntry::Header(format!(
-                        "{} plugin command{} — open a file to use them",
-                        commands.len(),
-                        if commands.len() == 1 { "" } else { "s" }
-                    )));
-                } else {
-                    entries.push(MenuEntry::Header("Run on the selection (or whole file)".into()));
-                    entries.extend(commands.into_iter().map(|(plugin, command, label)| {
-                        item_if(!self.plugin_state.running, label, None, A::RunPlugin(plugin, command))
-                    }));
-                }
                 entries.extend([
-                    MenuEntry::Separator,
                     item("Manage Plugins…", None, A::ManagePlugins),
                     item("Install Plugin from Folder…", None, A::InstallPluginFromFolder),
                     item("Open Plugins Folder", None, A::OpenPluginsFolder),
@@ -317,6 +303,12 @@ impl RootView {
             MenuId::Help => vec![
                 item("Keyboard Shortcuts", None, A::Shortcuts),
                 item("Check for Toolchain Updates…", None, A::CheckUpdates),
+                item_if(
+                    self.lsp_status == super::LspStatus::NotInstalled && self.jdtls_download.is_none(),
+                    "Install Java Language Server…",
+                    None,
+                    A::InstallJdtls,
+                ),
                 item("About RJID", None, A::About),
             ],
             MenuId::All => MenuId::BAR
@@ -335,7 +327,7 @@ impl RootView {
             // Nothing else runs while a debug session owns the program.
             MenuEntry::Item { label, shortcut, action, enabled } => {
                 let blocked = debug != DebugState::Idle
-                    && matches!(action, A::Run | A::RunCommand(_) | A::Debug | A::DebugCommand(_) | A::AttachDebugger);
+                    && matches!(action, A::Run | A::RunCommand(_) | A::Debug | A::AttachDebugger);
                 let needs_pause = matches!(action, A::Continue | A::Step(_));
                 MenuEntry::Item {
                     label,
@@ -366,24 +358,24 @@ impl RootView {
             item_if(self.workspace_root.is_some(), "Attach to JVM…", None, A::AttachDebugger),
             item_if(self.workspace_root.is_some(), "Run Configurations…", None, A::AddRunConfig),
             item("Android Devices…", None, A::AndroidDevices),
-            MenuEntry::Separator,
-            item_if(session, "Continue", Some("F8"), A::Continue),
-            item_if(session, "Step Over", Some("F10"), A::Step(StepDepth::Over)),
-            item_if(session, "Step Into", Some("F11"), A::Step(StepDepth::Into)),
-            item_if(session, "Step Out", Some("Shift+F11"), A::Step(StepDepth::Out)),
-            item_if(session, "Stop", Some("Shift+F5"), A::StopDebug),
         ];
+        // Stepping only while debugging (not a block of greyed-out items).
+        if session {
+            entries.extend([
+                MenuEntry::Separator,
+                item("Continue", Some("F8"), A::Continue),
+                item("Step Over", Some("F10"), A::Step(StepDepth::Over)),
+                item("Step Into", Some("F11"), A::Step(StepDepth::Into)),
+                item("Step Out", Some("Shift+F11"), A::Step(StepDepth::Out)),
+                item("Stop", Some("Shift+F5"), A::StopDebug),
+            ]);
+        }
 
-        // The detected project's tasks, with debug variants where the IDE
-        // can attach.
+        // The detected project's tasks (Debug above debugs the selected one).
         if let Some(project) = &self.project {
             entries.push(MenuEntry::Header(format!("{} tasks", project.kind_label())));
             for task in rji_project_java::project_tasks(project) {
-                let debuggable = crate::debug_session::debug_launch(&task.command, 0).is_some();
-                entries.push(item(task.label.clone(), None, A::RunCommand(task.command.clone())));
-                if debuggable && task.group == rji_project_java::TaskGroup::Run {
-                    entries.push(item(format!("{} (debug)", task.label), None, A::DebugCommand(task.command)));
-                }
+                entries.push(item(task.label.clone(), None, A::RunCommand(task.command)));
             }
         }
         entries
@@ -394,6 +386,8 @@ impl RootView {
         self.open_menu = None;
         match action {
             A::NewProject => self.open_new_project(window, cx),
+            A::GoToFile => self.open_palette(false, window, cx),
+            A::CommandPalette => self.open_palette(true, window, cx),
             A::OpenFolder => self.pick_folder(window, cx),
             A::OpenFolderInNewWindow => self.pick_folder_for_new_window(window, cx),
             A::OpenRecent(path) => self.open_folder(path, window, cx),
@@ -409,7 +403,7 @@ impl RootView {
             A::Save => {
                 if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get(i)) {
                     tab.view.update(cx, |editor, cx| {
-                        editor.save();
+                        editor.save(cx);
                         cx.notify();
                     });
                 }
@@ -439,7 +433,12 @@ impl RootView {
             A::ZoomIn => self.set_zoom(self.app_settings.ui_zoom + rji_settings::ZOOM_STEP, cx),
             A::ZoomOut => self.set_zoom(self.app_settings.ui_zoom - rji_settings::ZOOM_STEP, cx),
             A::ZoomReset => self.set_zoom(1.0, cx),
-            A::NextTheme => self.cycle_theme(cx),
+            A::Appearance => self.open_appearance(window, cx),
+            A::ToggleAutoSave => {
+                self.app_settings.auto_save = !self.app_settings.auto_save;
+                self.save_app_settings();
+                self.notify_user(if self.app_settings.auto_save { "Auto save on: edits are saved when the editor loses focus" } else { "Auto save off" });
+            }
             A::MoveTree => {
                 let side = if self.app_settings.tree_side == rji_settings::PanelSide::Left { rji_settings::PanelSide::Right } else { rji_settings::PanelSide::Left };
                 self.dock_tree(side, cx);
@@ -454,7 +453,6 @@ impl RootView {
             A::Run => self.run_active_config(window, cx),
             A::RunCommand(command) => self.run_in_terminal(&command, cx),
             A::Debug => self.start_debug(window, cx),
-            A::DebugCommand(command) => self.debug_command(&command, window, cx),
             A::AttachDebugger => self.prompt_attach(window, cx),
             A::Continue => self.resume_debug(cx),
             A::Step(depth) => self.step(depth, cx),
@@ -463,12 +461,27 @@ impl RootView {
             A::AndroidDevices => self.open_android_panel(cx),
             A::FocusTerminal => {
                 self.show_terminal();
-                let handle = gpui::Focusable::focus_handle(self.terminal.read(cx), cx);
-                window.focus(&handle, cx);
+                self.focus_terminal(window, cx);
             }
-            A::ClearTerminal => self.terminal.update(cx, |t, cx| t.clear(cx)),
-            A::RestartTerminal => self.terminal.update(cx, |t, cx| t.restart(cx)),
-            A::RunPlugin(plugin, command) => self.run_plugin_command(plugin, command, cx),
+            A::NewTerminal => {
+                self.show_terminal();
+                self.new_terminal(cx);
+                self.focus_terminal(window, cx);
+            }
+            A::ClearTerminal => {
+                if let Some(view) = self.active_terminal().cloned() {
+                    view.update(cx, |t, cx| t.clear(cx));
+                }
+            }
+            A::RestartTerminal => {
+                if let Some(view) = self.active_terminal().cloned() {
+                    view.update(cx, |t, cx| t.restart(cx));
+                }
+            }
+            A::CloseTerminal => {
+                let index = self.active_terminal;
+                self.close_terminal(index, cx);
+            }
             A::ManagePlugins => self.show_plugins = true,
             A::InstallPluginFromFolder => self.install_plugin_from_folder(window, cx),
             A::OpenPluginsFolder => {
@@ -478,6 +491,7 @@ impl RootView {
             }
             A::ReloadPlugins => self.reload_plugins(cx),
             A::Shortcuts => self.show_shortcuts = true,
+            A::InstallJdtls => self.offer_jdtls_download(window, cx),
             A::CheckUpdates => self.check_for_updates(true, cx),
             A::About => self.show_about(window, cx),
         }

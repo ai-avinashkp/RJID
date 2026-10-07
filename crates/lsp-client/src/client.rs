@@ -77,6 +77,9 @@ pub struct LspClient {
     next_id: i64,
     pending: Pending,
     pub diagnostics_rx: Receiver<PublishDiagnostics>,
+    /// Progress and status reports (project import, dependency downloads,
+    /// indexing) — see [`ServerStatus`].
+    pub status_rx: Receiver<ServerStatus>,
 }
 
 impl LspClient {
@@ -128,7 +131,8 @@ impl LspClient {
         let stdin: SharedStdin = Arc::new(Mutex::new(stdin));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (diagnostics_tx, diagnostics_rx) = unbounded();
-        spawn_reader_thread(stdout, stdin.clone(), pending.clone(), diagnostics_tx);
+        let (status_tx, status_rx) = unbounded();
+        spawn_reader_thread(stdout, stdin.clone(), pending.clone(), diagnostics_tx, status_tx);
 
         let mut client = LspClient {
             child,
@@ -136,6 +140,7 @@ impl LspClient {
             next_id: 1,
             pending,
             diagnostics_rx,
+            status_rx,
         };
         client.initialize(workspace_root)?;
         Ok(client)
@@ -169,6 +174,11 @@ impl LspClient {
         let params = json!({
             "processId": std::process::id(),
             "rootUri": path_to_uri(workspace_root),
+            // Lets definitions resolve into JDK / library classes (jdt:// URIs
+            // whose source is fetched with `java/classFileContents`).
+            "initializationOptions": {
+                "extendedClientCapabilities": { "classFileContentsSupport": true }
+            },
             "capabilities": {
                 "textDocument": {
                     "publishDiagnostics": { "relatedInformation": false },
@@ -193,7 +203,9 @@ impl LspClient {
                 "workspace": {
                     "applyEdit": true,
                     "workspaceEdit": { "documentChanges": true }
-                }
+                },
+                // Lets jdtls report project import / download progress.
+                "window": { "workDoneProgress": true }
             },
         });
         let (tx, rx) = bounded(1);
@@ -231,6 +243,16 @@ impl LspClient {
                 "textDocument": { "uri": path_to_uri(path), "version": version },
                 "contentChanges": [ { "text": text } ],
             }),
+        )
+    }
+
+    /// Tells jdtls a build file (`pom.xml`, `build.gradle[.kts]`) changed, so
+    /// it re-imports the project and downloads new dependencies. Progress
+    /// arrives on `status_rx`.
+    pub fn project_configuration_update(&mut self, build_file: &Path) -> anyhow::Result<()> {
+        self.send_notification(
+            "java/projectConfigurationUpdate",
+            json!({ "uri": path_to_uri(build_file) }),
         )
     }
 
@@ -321,6 +343,7 @@ fn spawn_reader_thread(
     stdin: SharedStdin,
     pending: Pending,
     diagnostics_tx: Sender<PublishDiagnostics>,
+    status_tx: Sender<ServerStatus>,
 ) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -351,7 +374,11 @@ fn spawn_reader_thread(
                         break;
                     }
                 }
-                (Some(_), None) => {} // other notifications: logs, progress
+                (Some(method), None) => {
+                    if let Some(status) = parse_server_status(method, &value) {
+                        let _ = status_tx.send_blocking(status);
+                    }
+                }
                 (None, Some(id)) => {
                     let handler = pending.lock().unwrap().remove(&id);
                     if let Some(handler) = handler {
@@ -419,6 +446,49 @@ pub fn parse_hover(response: &Value) -> Option<String> {
     };
     let text = text.trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// What the server is busy with, for the status bar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServerStatus {
+    /// `$/progress` (work-done progress): `token` identifies one task.
+    Progress {
+        token: String,
+        title: Option<String>,
+        message: Option<String>,
+        percentage: Option<u32>,
+        done: bool,
+    },
+    /// jdtls's own `language/status` (e.g. "Starting", "ServiceReady",
+    /// "Message" with text like "Importing Maven project(s)").
+    Status { kind: String, message: String },
+}
+
+/// `$/progress` and jdtls `language/status` notifications.
+pub fn parse_server_status(method: &str, value: &Value) -> Option<ServerStatus> {
+    let params = value.get("params")?;
+    match method {
+        "$/progress" => {
+            let token = match params.get("token")? {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let progress = params.get("value")?;
+            let text = |key: &str| progress.get(key).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty());
+            Some(ServerStatus::Progress {
+                token,
+                title: text("title"),
+                message: text("message"),
+                percentage: progress.get("percentage").and_then(Value::as_u64).map(|p| p.min(100) as u32),
+                done: progress.get("kind").and_then(Value::as_str) == Some("end"),
+            })
+        }
+        "language/status" => Some(ServerStatus::Status {
+            kind: params.get("type").and_then(Value::as_str).unwrap_or("").to_string(),
+            message: params.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
+        }),
+        _ => None,
+    }
 }
 
 /// Accepts both response shapes the spec allows: a bare item array or a

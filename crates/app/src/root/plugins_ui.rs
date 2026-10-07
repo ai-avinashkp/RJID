@@ -56,22 +56,6 @@ impl RootView {
         cx.notify();
     }
 
-    /// `(plugin index, command id, menu label)` for every command.
-    pub(super) fn plugin_commands(&self) -> Vec<(usize, String, String)> {
-        self.plugin_state
-            .plugins
-            .iter()
-            .enumerate()
-            .flat_map(|(i, plugin)| {
-                plugin
-                    .manifest
-                    .commands
-                    .iter()
-                    .map(move |c| (i, c.id.clone(), format!("{}: {}", plugin.manifest.name, c.title)))
-            })
-            .collect()
-    }
-
     /// Runs a command on the active editor's selection (or whole file) in
     /// a background thread; the result is applied as one undoable edit if
     /// the file hasn't changed meanwhile.
@@ -248,6 +232,7 @@ impl RootView {
                 .border_color(theme.border)
         };
 
+        let has_editor = self.active_tab.is_some();
         let mut installed = div().flex().flex_col().gap_2();
         if self.plugin_state.plugins.is_empty() {
             installed = installed.child(
@@ -274,11 +259,25 @@ impl RootView {
                             ),
                     )
                     .when(!m.description.is_empty(), |c| c.child(m.description.clone()))
-                    .child(div().text_size(px(11.)).child(format!(
-                        "{} command{} · in the Plugins menu",
-                        m.commands.len(),
-                        if m.commands.len() == 1 { "" } else { "s" }
-                    ))),
+                    // Commands run on the active editor's selection (or the
+                    // whole file).
+                    .child(
+                        div().flex().flex_row().flex_wrap().gap_1().children(m.commands.iter().enumerate().map(|(j, command)| {
+                            let command_id = command.id.clone();
+                            let enabled = has_editor && !self.plugin_state.running;
+                            button(("plugin-run", i * 100 + j), format!("▶ {}", command.title), false)
+                                .when(enabled, |b| {
+                                    b.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.show_plugins = false;
+                                        this.run_plugin_command(i, command_id.clone(), cx);
+                                    }))
+                                })
+                                .when(!enabled, |b| b.opacity(0.5))
+                        })),
+                    )
+                    .when(!has_editor, |c| {
+                        c.child(div().text_size(px(11.)).child("Open a file to run these on its selection (or the whole file)."))
+                    }),
             );
         }
         for err in &self.plugin_state.errors {

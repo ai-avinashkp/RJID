@@ -311,7 +311,7 @@ impl CodeEditorView {
             }
             HoverTarget::Gutter(line) => self.diagnostic_list.iter().filter(|d| d.line as usize == *line).map(|d| d.raw.clone()).collect(),
         };
-        if !raw.is_empty() && self.is_java() && self.lsp.borrow().is_some() {
+        if !raw.is_empty() && (self.is_pom() || (self.is_java() && self.lsp.borrow().is_some())) {
             let range = match &target {
                 HoverTarget::Text(span) => span.clone(),
                 HoverTarget::Gutter(line) => self.buffer.line_range(*line),

@@ -6,6 +6,7 @@
 //! by the IDE; those get a download link.
 
 mod checker;
+pub mod jdtls;
 mod project;
 mod self_update;
 mod sources;

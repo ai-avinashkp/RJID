@@ -2,6 +2,7 @@
 //! JDK discovery.
 
 pub mod gradle;
+pub mod java_source;
 pub mod jdk_detect;
 pub mod maven;
 pub mod project;

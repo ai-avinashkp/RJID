@@ -43,38 +43,37 @@ from one fast native window.
   </tr>
   <tr>
     <td align="center"><sub>Java editing with live diagnostics from jdtls</sub></td>
-    <td align="center"><sub>One of 5 built-in themes (high contrast)</sub></td>
+    <td align="center"><sub>One of 13 built-in themes (high contrast)</sub></td>
   </tr>
 </table>
 
 ## Features
 
-- **Knows your project.** Detects plain Java, Maven, Gradle, Spring Boot (and
-  whether it serves HTTP), JavaFX and Android. Build / Test / ▶ Run do the right
-  thing for each.
-- **New Project wizard.** Java console, Spring Boot web or JavaFX, with Maven,
-  Gradle or no build tool. Library versions are matched to your JDK.
-- **Java intelligence** via the Eclipse JDT Language Server:
-  - completion that adds the `import` for you;
-  - hover with signatures and Javadoc;
-  - error squiggles and quick fixes;
-  - rename across files and extract refactorings;
-  - generate constructor, getters/setters, `toString`, `equals`/`hashCode`.
-- **Debugger.** Breakpoints, step over/into/out, variables and call stack, for
-  `java`, `mvn spring-boot:run`, `exec:java`, tests, or attaching to a running JVM.
-- **Real terminal.** A VT emulator (`alacritty_terminal`) with colors and full-screen
-  apps. Spring Boot's "started on port" shows up as a one-click
-  **localhost ↗** link.
-- **Toolchain updates.** Checks JDK, Maven, Spring Boot and JavaFX like IntelliJ:
-  notifies by default, auto-applies only safe patch updates if you opt in, keeps
-  backups, and never installs a JDK on its own.
-- **Comfortable UI.** Custom title bar with menus, 5 themes, zoom, movable panels
-  (tree left/right, terminal bottom/right), drag-and-drop folders, and a responsive
-  layout down to 400×500.
-- **Portable.** All settings live next to the app (`.rji-settings/`), plus a
-  per-project `.rji/` folder. Nothing is scattered across your system.
-- **Extensible.** Sandboxed WebAssembly plugins (no file, network or process access).
-- **Android (early).** Device and emulator list, build → install → run, logcat.
+- **Project-aware** — recognizes plain Java, Maven, Gradle, Spring Boot, JavaFX and
+  Android; Build / Test / ▶ Run just do the right thing.
+- **New Project wizard** — console, Spring Boot web or JavaFX, with Maven, Gradle or
+  no build tool.
+- **Java intelligence** — completion with auto-import, hover docs, live errors and
+  quick fixes, rename, refactorings, and a VS Code-style **Source Action** menu
+  (generate, override, organize imports…). The language server is set up for you
+  on first use.
+- **Navigation** — Ctrl+Click / F12 to jump to any definition (including JDK
+  sources), **Ctrl+P** to open any file, **Ctrl+Shift+P** for every command.
+- **Debugger** — breakpoints, stepping, variables and call stack; attach to a
+  running JVM.
+- **Terminal** — real VT terminal with tabs; build results in green / red, and a
+  one-click **localhost ↗** link when your server starts.
+- **Build files** — dependency changes re-import automatically, with missing
+  versions fixed for you.
+- **Toolchain updates** — knows when your JDK, Maven, Spring Boot or JavaFX have
+  updates; safe ones can apply themselves if you allow it.
+- **Your look** — 13 themes, your favorite coding fonts, zoom, movable panels,
+  auto-save, and a layout that works down to 400×500.
+- **Portable & extensible** — settings live next to the app; sandboxed
+  WebAssembly plugins; early Android support.
+
+There's more to find — Help ▸ Keyboard Shortcuts and the Command Palette are good
+places to start.
 
 ## Get RJID
 
@@ -92,7 +91,7 @@ cargo run --release -p rji-app
 |---|---|
 | Rust 1.88+ (edition 2024) | A JDK (17+ recommended) |
 | Windows 10/11 (macOS/Linux untested) | Maven and/or Gradle for those projects |
-| | jdtls: the VS Code *Language Support for Java* extension, or `JDTLS_HOME` pointing at a [jdtls download](https://download.eclipse.org/jdtls/) |
+| | JDK 21+ for the Java language server, which RJID downloads on first use (or uses your VS Code Java extension / `JDTLS_HOME`) |
 
 The first build downloads and compiles GPUI and takes a few minutes; rebuilds are
 quick. The binary is `target/release/rjid` (`rjid.exe` on Windows):
@@ -102,14 +101,16 @@ quick. The binary is `target/release/rjid` (`rjid.exe` on Windows):
 
 | Keys | Action |
 |---|---|
+| Ctrl+P / Ctrl+Shift+P | Go to file / command palette |
+| F12 or Ctrl+Click | Go to definition |
 | Ctrl+Space | Completion |
 | Ctrl+. / F2 | Quick fix / rename symbol |
-| Alt+Insert or right-click | Generate, refactor, imports, format |
+| Shift+Alt+S | Source action (generate, override, …) |
 | Shift+Alt+O / Shift+Alt+F | Organize imports / format document |
 | Ctrl+F / Ctrl+H / Ctrl+G | Find / replace / go to line |
 | F5 / Shift+F5 | Debug / stop |
 | F8 / F10 / F11 / Shift+F11 | Continue / step over / into / out |
-| Ctrl+B / Ctrl+` | Toggle file tree / terminal |
+| Ctrl+B / Ctrl+` / Ctrl+Shift+` | Toggle file tree / terminal / new terminal |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom |
 
 All shortcuts are listed under Help ▸ Keyboard Shortcuts.

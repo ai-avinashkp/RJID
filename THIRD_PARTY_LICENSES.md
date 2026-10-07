@@ -16,12 +16,15 @@ These crates are explicitly marked `license = "Apache-2.0"` in their own `Cargo.
 Direct dependencies added since, all under permissive licenses (no
 copyleft): `alacritty_terminal` (Apache-2.0), `portable-pty` (MIT),
 `wasmi` (MIT OR Apache-2.0), `ureq` + `rustls` (MIT OR Apache-2.0 / ISC),
+`flate2`, `tar` (MIT OR Apache-2.0),
 `ed25519-dalek` (BSD-3-Clause), `sha2`, `base64`, `rand`, `regex`,
 `roxmltree`, `serde`, `serde_json`, `anyhow` (MIT OR Apache-2.0).
 
 External tools the IDE runs as separate processes, never bundles or links:
 the JDK, Maven, Gradle, Eclipse JDT Language Server (EPL-2.0), and the
-Android SDK tools. Plugins are user-installed and carry their own licenses.
+Android SDK tools. When no JDT Language Server is found, RJID offers to download
+it from download.eclipse.org (only after the user agrees) into its own folder;
+it is not bundled with RJID. Plugins are user-installed and carry their own licenses.
 
 A full transitive license report (e.g. via `cargo-about`) should be
 generated for each binary release (tracked in Phase 6 of `docs/ROADMAP.md`).

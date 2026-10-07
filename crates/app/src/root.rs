@@ -32,10 +32,16 @@ use rji_theme::{Theme, icon_for};
 mod prompts;
 mod titlebar;
 mod android_ui;
+mod appearance_ui;
 mod dock_ui;
+mod definitions;
 mod drop_ui;
+mod jdtls_setup;
 mod new_project_ui;
+mod palette;
 mod run_configs_ui;
+mod server_activity;
+mod terminal_tabs;
 mod plugins_ui;
 mod updates_ui;
 
@@ -47,7 +53,6 @@ use crate::devtools_hook::{DevtoolsHook, SharedDevtoolsHook};
 use crate::editor_view::{CodeEditorView, EditorEvent};
 use crate::lsp_shared::SharedLspClient;
 use crate::scrollbar::scroll_thumb;
-use crate::terminal_view::{TerminalEvent, TerminalView};
 
 const TOOLBAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 32.0;
@@ -72,6 +77,8 @@ enum LspStatus {
     Starting,
     Ready,
     Unavailable(&'static str),
+    /// No language server on this computer: the IDE can download one.
+    NotInstalled,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -94,6 +101,8 @@ struct OpenTab {
     path: PathBuf,
     view: Entity<CodeEditorView>,
     _subscription: Subscription,
+    /// Auto-save when focus leaves this editor.
+    _focus_out: Subscription,
 }
 
 pub struct RootView {
@@ -102,7 +111,11 @@ pub struct RootView {
     expanded_dirs: HashSet<PathBuf>,
     tabs: Vec<OpenTab>,
     active_tab: Option<usize>,
-    terminal: Entity<TerminalView>,
+    /// Terminal tabs (see `terminal_tabs`); `active_terminal` indexes them.
+    terminals: Vec<terminal_tabs::TerminalTab>,
+    active_terminal: usize,
+    /// Numbers new tabs ("powershell 3").
+    terminal_counter: usize,
     maven_project: Option<MavenProject>,
     gradle_project: Option<GradleProject>,
     /// What kind of project the workspace is (build tool, frameworks,
@@ -110,9 +123,16 @@ pub struct RootView {
     project: Option<ProjectInfo>,
     /// Port of the web server the last run reported as listening.
     server_port: Option<u16>,
-    _terminal_subscription: Subscription,
     new_project: Option<new_project_ui::NewProjectWizard>,
     run_configs: Option<run_configs_ui::RunConfigsPanel>,
+    /// Go to File / command palette (Ctrl+P, Ctrl+Shift+P).
+    palette: Option<palette::Palette>,
+    /// View ▸ Theme & Fonts… (live preview until Done / Cancel).
+    appearance: Option<appearance_ui::AppearancePicker>,
+    /// Window height at the last render (popups size to it).
+    viewport_height: f32,
+    file_index: Option<palette::FileIndex>,
+    file_index_scanning: bool,
     jdk_candidates: Vec<JdkCandidate>,
     focus_handle: FocusHandle,
     tree_scroll: ScrollHandle,
@@ -120,6 +140,21 @@ pub struct RootView {
 
     lsp: SharedLspClient,
     lsp_status: LspStatus,
+    /// Downloading the Java language server (first-run setup).
+    jdtls_download: Option<jdtls_setup::JdtlsDownload>,
+    /// "Not Now" was chosen this session: don't ask again on every file.
+    jdtls_offer_declined: bool,
+    /// jdtls tasks in progress (project import, dependency resolution).
+    server_tasks: Vec<server_activity::ServerTask>,
+    /// jdtls's latest one-off status message, while it's busy.
+    server_message: Option<String>,
+    /// A build-file save is being re-imported: (started, generation).
+    dependency_update: Option<(std::time::Instant, u64)>,
+    dependency_update_generation: u64,
+    spinner_frame: usize,
+    spinner_running: bool,
+    /// Window-level observers (auto-save on deactivation).
+    window_subscriptions: Vec<Subscription>,
     /// Bumped whenever the workspace changes, so a language server that
     /// finishes starting for the *previous* workspace is discarded.
     lsp_generation: u64,
@@ -180,10 +215,6 @@ impl RootView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let app_settings = load_app_settings();
         let workspace_root = initial_workspace(&app_settings);
-        let theme = Theme::for_kind(app_settings.theme);
-        let terminal_cwd = workspace_root.clone().unwrap_or_else(|| PathBuf::from("."));
-        let zoom = app_settings.ui_zoom;
-        let (terminal, terminal_subscription) = Self::make_terminal(terminal_cwd, theme, zoom, cx);
         let maven_project = workspace_root.as_deref().and_then(detect_maven_project);
         let gradle_project = workspace_root.as_deref().and_then(detect_gradle_project);
         let project = workspace_root.as_deref().and_then(detect_project);
@@ -199,12 +230,18 @@ impl RootView {
             expanded_dirs: HashSet::new(),
             tabs: Vec::new(),
             active_tab: None,
-            terminal,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            terminal_counter: 0,
             project,
             server_port: None,
-            _terminal_subscription: terminal_subscription,
             new_project: None,
             run_configs: None,
+            palette: None,
+            appearance: None,
+            viewport_height: 820.0,
+            file_index: None,
+            file_index_scanning: false,
             maven_project,
             gradle_project,
             jdk_candidates: detect_jdks(),
@@ -213,6 +250,15 @@ impl RootView {
             debug_scroll: ScrollHandle::new(),
             lsp: Rc::new(RefCell::new(None)),
             lsp_status: LspStatus::Idle,
+            jdtls_download: None,
+            jdtls_offer_declined: false,
+            server_tasks: Vec::new(),
+            server_message: None,
+            dependency_update: None,
+            dependency_update_generation: 0,
+            spinner_frame: 0,
+            spinner_running: false,
+            window_subscriptions: Vec::new(),
             lsp_generation: 0,
             devtools,
             breakpoints: HashMap::new(),
@@ -248,37 +294,6 @@ impl RootView {
         }
         root.maybe_check_updates(cx);
         root
-    }
-
-    /// A terminal panel plus the subscription that reacts to servers it
-    /// starts (the "open in browser" link, port-in-use hints).
-    fn make_terminal(
-        cwd: PathBuf,
-        theme: Theme,
-        zoom: f32,
-        cx: &mut Context<Self>,
-    ) -> (Entity<TerminalView>, Subscription) {
-        let terminal = cx.new(|cx| {
-            let mut terminal = TerminalView::new(cwd, theme, cx);
-            terminal.zoom = zoom;
-            terminal
-        });
-        let subscription = cx.subscribe(&terminal, |this, _, event: &TerminalEvent, cx| {
-            match *event {
-                TerminalEvent::ServerStarted(port) => {
-                    this.server_port = Some(port);
-                    this.notify_user(format!("Server running at http://localhost:{port}/"));
-                }
-                TerminalEvent::PortInUse(port) => {
-                    this.server_port = None;
-                    this.notify_user(format!(
-                        "Port {port} is already in use — stop the other server, or set server.port in application.properties"
-                    ));
-                }
-            }
-            cx.notify();
-        });
-        (terminal, subscription)
     }
 
     pub fn focus_handle_for_init(&self) -> FocusHandle {
@@ -366,21 +381,37 @@ impl RootView {
 
     // ---- appearance ------------------------------------------------------
 
-    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
-        self.app_settings.theme = self.app_settings.theme.next();
-        self.save_app_settings();
+    /// Pushes the current theme and fonts (from `app_settings`) to every
+    /// open editor and terminal. Doesn't save: callers decide (Theme &
+    /// Fonts previews live and saves only on Done).
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
         let theme = self.theme();
+        let (editor_family, editor_size) = self.editor_font();
+        let (terminal_family, terminal_size) = self.terminal_font();
         for tab in &self.tabs {
             tab.view.update(cx, |view, cx| {
                 view.theme = theme;
+                view.font_family = editor_family.clone();
+                view.font_size = editor_size;
                 cx.notify();
             });
         }
-        self.terminal.update(cx, |view, cx| {
+        self.for_each_terminal(cx, |view| {
             view.theme = theme;
-            cx.notify();
+            view.font_family = terminal_family.clone();
+            view.font_size = terminal_size;
         });
         cx.notify();
+    }
+
+    fn editor_font(&self) -> (gpui::SharedString, f32) {
+        let s = &self.app_settings;
+        (crate::fonts::family_or_default(s.editor_font_family.as_deref()), rji_settings::clamp_font_size(s.editor_font_size))
+    }
+
+    fn terminal_font(&self) -> (gpui::SharedString, f32) {
+        let s = &self.app_settings;
+        (crate::fonts::family_or_default(s.terminal_font_family.as_deref()), rji_settings::clamp_font_size(s.terminal_font_size))
     }
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
@@ -393,10 +424,7 @@ impl RootView {
                 cx.notify();
             });
         }
-        self.terminal.update(cx, |view, cx| {
-            view.zoom = zoom;
-            cx.notify();
-        });
+        self.for_each_terminal(cx, |view| view.zoom = zoom);
         cx.notify();
     }
 
@@ -425,8 +453,7 @@ impl RootView {
         self.app_settings.show_terminal = !self.app_settings.show_terminal;
         self.save_app_settings();
         if self.app_settings.show_terminal {
-            let handle = self.terminal.focus_handle(cx);
-            window.focus(&handle, cx);
+            self.focus_terminal(window, cx);
         } else {
             self.focus_active_editor(window, cx);
         }
@@ -495,13 +522,12 @@ impl RootView {
             self.check_for_updates(false, cx);
         }
 
-        let theme = self.theme();
-        let zoom = self.app_settings.ui_zoom;
-        self.terminal.update(cx, |terminal, _| terminal.shutdown());
-        let (terminal, subscription) = Self::make_terminal(path, theme, zoom, cx);
-        self.terminal = terminal;
-        self._terminal_subscription = subscription;
+        // Every shell was in the old folder: start over with one there.
+        self.shutdown_terminals(cx);
         self.server_port = None;
+        if self.app_settings.show_terminal {
+            self.new_terminal(cx);
+        }
         cx.notify();
     }
 
@@ -576,28 +602,46 @@ impl RootView {
 
         let theme = self.theme();
         let zoom = self.app_settings.ui_zoom;
-        let is_java = path.extension().and_then(|e| e.to_str()) == Some("java");
+        // Library sources fetched for Go to Definition are read-only and
+        // not part of the project (the language server must not see them).
+        let library_source = path.starts_with(definitions::library_sources_root());
+        let is_java = path.extension().and_then(|e| e.to_str()) == Some("java") && !library_source;
         let saved_breakpoints = self.breakpoints.get(&path).cloned().unwrap_or_default();
+        let editor_font = self.editor_font();
         let lsp = self.lsp.clone();
         let devtools = self.devtools.clone();
         let view = cx.new(|cx| {
             let mut editor = CodeEditorView::new(path.clone(), content.clone(), theme, lsp, devtools, cx);
             editor.zoom = zoom;
+            (editor.font_family, editor.font_size) = editor_font.clone();
             editor.set_breakpoints(saved_breakpoints);
+            editor.read_only = library_source;
             editor
         });
         let subscription = cx.subscribe_in(&view, window, |this, view, event: &EditorEvent, window, cx| match event {
             EditorEvent::BreakpointsChanged => this.on_breakpoints_changed(view, cx),
+            EditorEvent::Saved => {
+                let path = view.read(cx).path.clone();
+                this.on_file_saved(&path, cx);
+            }
             EditorEvent::Notice(message) => {
                 this.notify_user(message.clone());
                 cx.notify();
             }
             EditorEvent::ExternalEdits(files) => this.apply_external_edits(files.clone(), window, cx),
+            EditorEvent::OpenLocation(location) => this.open_location(location.clone(), window, cx),
+        });
+        let weak_view = view.downgrade();
+        let focus_out = cx.on_focus_out(&view.focus_handle(cx), window, move |this, _, _, cx| {
+            if let Some(view) = weak_view.upgrade() {
+                this.autosave(&view, cx);
+            }
         });
         self.tabs.push(OpenTab {
             path: path.clone(),
             view,
             _subscription: subscription,
+            _focus_out: focus_out,
         });
         self.activate_tab(self.tabs.len() - 1, window, cx);
 
@@ -606,6 +650,9 @@ impl RootView {
                 let _ = client.did_open(&path, &content.replace("\r\n", "\n"));
             }
             self.spawn_lsp_if_needed(cx);
+            if self.lsp_status == LspStatus::NotInstalled && !self.jdtls_offer_declined {
+                self.offer_jdtls_download(window, cx);
+            }
         }
     }
 
@@ -766,7 +813,7 @@ impl RootView {
                 continue;
             }
             tab.view.update(cx, |view, cx| {
-                view.save();
+                view.save(cx);
                 cx.notify();
             });
             all_saved &= !tab.view.read(cx).dirty;
@@ -860,7 +907,7 @@ impl RootView {
         if let Some(session) = self.debug.take() {
             session.borrow_mut().stop();
         }
-        self.terminal.update(cx, |terminal, _| terminal.shutdown());
+        self.shutdown_terminals(cx);
     }
 
     // ---- language server -----------------------------------------------------
@@ -875,16 +922,21 @@ impl RootView {
         let Some(workspace_root) = self.workspace_root.clone() else {
             return;
         };
-        let Some(jdk) = self.jdk_candidates.first() else {
+        if self.jdk_candidates.is_empty() {
             self.lsp_status = LspStatus::Unavailable("no JDK found");
             return;
+        }
+        let Some(jdk_home) = self.jdk_for_jdtls().map(|jdk| jdk.home.clone()) else {
+            self.lsp_status = LspStatus::Unavailable("needs JDK 21+ to run");
+            return;
         };
-        let Some(jdtls) = rji_lsp_client::discover_jdtls() else {
-            self.lsp_status = LspStatus::Unavailable("jdtls not found (install the VS Code Java extension)");
+        let managed = rji_updates::jdtls::installed(&jdtls_setup::managed_jdtls_root());
+        let Some(jdtls) = rji_lsp_client::discover_jdtls_with(managed.as_deref()) else {
+            self.lsp_status = LspStatus::NotInstalled;
             return;
         };
         self.lsp_status = LspStatus::Starting;
-        let java_exe = jdk.home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+        let java_exe = jdk_home.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
         let data_dir = jdtls_data_dir(&workspace_root);
         let shared_lsp = self.lsp.clone();
         let generation = self.lsp_generation;
@@ -918,10 +970,20 @@ impl RootView {
                 return;
             }
             let diagnostics_rx = client.diagnostics_rx.clone();
+            let status_rx = client.status_rx.clone();
             *shared_lsp.borrow_mut() = Some(client);
 
             root.update(cx, |root, cx| {
                 root.lsp_status = LspStatus::Ready;
+                // Import / dependency progress for the status bar.
+                cx.spawn(async move |this, cx| {
+                    while let Ok(status) = status_rx.recv().await {
+                        if this.update(cx, |root, cx| root.on_server_status(status, cx)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
                 for tab in &root.tabs {
                     if tab.path.extension().and_then(|e| e.to_str()) == Some("java") {
                         let content = tab.view.read(cx).text().to_string();
@@ -982,8 +1044,12 @@ impl RootView {
     fn run_in_terminal(&mut self, command: &str, cx: &mut Context<Self>) {
         self.explain_run(command);
         self.show_terminal();
+        // A new run: the old green/red result no longer applies.
+        if let Some(tab) = self.terminals.get_mut(self.active_terminal) {
+            tab.status = None;
+        }
         let command = format!("{command}\r");
-        self.terminal.update(cx, |view, cx| {
+        self.ensure_terminal(cx).update(cx, |view, cx| {
             view.send_text(&command);
             cx.notify();
         });
@@ -1223,10 +1289,34 @@ impl RootView {
     /// Runs before any child sees the key (capture phase): Escape closes an
     /// open menu or overlay even while an editor has focus.
     fn capture_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key != "escape" {
+        let keystroke = &event.keystroke;
+        let ctrl = keystroke.modifiers.control || keystroke.modifiers.platform;
+        // Go to File / commands work from anywhere (editor, terminal, inputs).
+        if ctrl && !keystroke.modifiers.alt && keystroke.key == "p" {
+            self.open_palette(keystroke.modifiers.shift, window, cx);
+            cx.stop_propagation();
             return;
         }
-        if self.open_menu.is_some() || self.context_menu.is_some() {
+        if self.palette.is_some() && self.palette_key(keystroke.key.as_str(), cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.appearance.is_some() {
+            match keystroke.key.as_str() {
+                "escape" => self.close_appearance(false, cx),
+                key if self.appearance_key(key, cx) => {}
+                // Modal: nothing reaches the editor behind it.
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if keystroke.key != "escape" {
+            return;
+        }
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+        } else if self.open_menu.is_some() || self.context_menu.is_some() {
             self.open_menu = None;
             self.context_menu = None;
         } else if self.show_shortcuts {
@@ -1282,6 +1372,11 @@ impl RootView {
                 }
             }
             "tab" if ctrl => self.cycle_tab(!shift, window, cx),
+            "`" | "~" if ctrl && shift => {
+                self.show_terminal();
+                self.new_terminal(cx);
+                self.focus_terminal(window, cx);
+            }
             "`" if ctrl => self.toggle_terminal(window, cx),
             "b" if ctrl => self.toggle_tree(cx),
             "s" if ctrl && shift => {
@@ -1368,6 +1463,19 @@ impl RootView {
         let minimal = width < MINIMAL_TOOLBAR_WIDTH;
         let mut left = div().flex().flex_row().items_center().gap_1().min_w_0().overflow_hidden();
         let mut right = div().flex().flex_row().flex_shrink_0().items_center().gap_1();
+
+        // Go to File: the way to open files when the tree is hidden (narrow window).
+        if self.workspace_root.is_some() {
+            right = right.child(ghost_button(
+                "search-files",
+                "⌕",
+                (!compact).then(|| "Search files".to_string()),
+                "Go to File (Ctrl+P) · Commands (Ctrl+Shift+P)".to_string(),
+                theme.foreground,
+                theme,
+                cx.listener(|this, _, window, cx| this.open_palette(false, window, cx)),
+            ));
+        }
 
         // Project chip + Build/Test (all tasks are also under Run).
         if let Some(project) = &self.project {
@@ -1518,12 +1626,19 @@ impl RootView {
         let mut elements = Vec::new();
         for entry in self.dir_entries(dir) {
             let indent = px((depth as f32) * 14.0 + 6.0);
-            let click_path = entry.path.clone();
-            let menu_path = entry.path.clone();
             let is_dir = entry.is_dir;
-            let expanded = is_dir && self.expanded_dirs.contains(&entry.path);
-            let is_active = active == Some(entry.path.as_path());
-            let has_breakpoints = self.breakpoints.contains_key(&entry.path);
+            // `javamxample` style: a chain of folders that each hold just
+            // one subfolder is shown (and expanded) as one row.
+            let (path, label) = if is_dir {
+                self.compact_dir(&entry.path, &entry.name)
+            } else {
+                (entry.path.clone(), entry.name.clone())
+            };
+            let click_path = path.clone();
+            let menu_path = path.clone();
+            let expanded = is_dir && self.expanded_dirs.contains(&path);
+            let is_active = active == Some(path.as_path());
+            let has_breakpoints = self.breakpoints.contains_key(&path);
 
             let marker = if is_dir {
                 div()
@@ -1542,7 +1657,7 @@ impl RootView {
             };
 
             let row = div()
-                .id(entry.path.to_string_lossy().into_owned())
+                .id(path.to_string_lossy().into_owned())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1561,7 +1676,7 @@ impl RootView {
                 .when(is_active, |s| s.bg(theme.accent.opacity(0.22)))
                 .hover(|s| s.bg(theme.accent.opacity(0.16)))
                 .child(marker)
-                .child(entry.name.clone())
+                .child(label)
                 .when(has_breakpoints, |s| {
                     s.child(div().w(px(6.)).h(px(6.)).rounded_full().bg(theme.error))
                 })
@@ -1582,10 +1697,29 @@ impl RootView {
 
             elements.push(row.into_any_element());
             if expanded {
-                elements.extend(self.render_tree_entries(&entry.path, depth + 1, active, cx));
+                elements.extend(self.render_tree_entries(&path, depth + 1, active, cx));
             }
         }
         elements
+    }
+
+    /// Follows a chain of folders that each contain exactly one subfolder
+    /// (and no files): returns the deepest one and the joined label.
+    fn compact_dir(&self, path: &Path, name: &str) -> (PathBuf, String) {
+        let mut path = path.to_path_buf();
+        let mut label = name.to_string();
+        for _ in 0..32 {
+            let children = self.dir_entries(&path);
+            match children.as_slice() {
+                [only] if only.is_dir => {
+                    label.push(std::path::MAIN_SEPARATOR);
+                    label.push_str(&only.name);
+                    path = only.path.clone();
+                }
+                _ => break,
+            }
+        }
+        (path, label)
     }
 
     fn render_tree_panel(&self, theme: Theme, width: f32, height: f32, cx: &Context<Self>) -> impl IntoElement {
@@ -2018,8 +2152,36 @@ impl RootView {
             LspStatus::Ready => ("Java: ready".to_string(), theme.success),
             LspStatus::Unavailable(_) if compact => ("Java: unavailable".to_string(), theme.warning),
             LspStatus::Unavailable(why) => (format!("Java: {why}"), theme.warning),
+            // Rendered as a clickable item below.
+            LspStatus::NotInstalled => (String::new(), theme.warning),
         };
-        if !lsp_text.is_empty() {
+        if self.lsp_status == LspStatus::NotInstalled && self.jdtls_download.is_none() {
+            right = right.child(
+                div()
+                    .id("install-jdtls")
+                    .px_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .whitespace_nowrap()
+                    .text_color(theme.warning)
+                    .hover(|s| s.bg(theme.accent.opacity(0.16)))
+                    .tooltip(crate::tooltip::Tooltip::text("No Java language server found — click to download it (about 50 MB)", theme))
+                    .child(if compact { "Java: install" } else { "Java: install language server" })
+                    .on_click(cx.listener(|this, _, window, cx| this.offer_jdtls_download(window, cx))),
+            );
+        }
+        if let Some(activity) = self.server_activity() {
+            // e.g. "⟳ Updating project configurations" after editing pom.xml.
+            right = right.child(
+                div()
+                    .max_w(px(if compact { 160. } else { 360. }))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(theme.accent)
+                    .child(format!("{} {activity}", server_activity::SPINNER[self.spinner_frame % server_activity::SPINNER.len()])),
+            );
+        } else         if !lsp_text.is_empty() {
             right = right.child(div().whitespace_nowrap().text_color(lsp_color).child(lsp_text));
         }
         if !compact {
@@ -2058,6 +2220,7 @@ impl Render for RootView {
         let zoom = self.app_settings.ui_zoom;
         let viewport_w = f32::from(window.viewport_size().width);
         let viewport_h = f32::from(window.viewport_size().height);
+        self.viewport_height = viewport_h;
         if (viewport_w - self.viewport_width).abs() > 0.5 {
             if viewport_w >= NARROW_TREE_WIDTH {
                 self.tree_forced_in_narrow = false;
@@ -2090,6 +2253,12 @@ impl Render for RootView {
         // version a `flex_1` sibling next to a fixed-height child didn't
         // reliably get its share of space, so the layout is kept fully
         // deterministic.
+        // A visible terminal panel always has at least one terminal (it may
+        // have been shown from a menu, by docking, or after `exit`).
+        if self.app_settings.show_terminal && self.terminals.is_empty() {
+            self.new_terminal(cx);
+        }
+
         // Docking: the tree on the left or right, the terminal at the bottom
         // or on the right (a narrow window always puts it at the bottom).
         let show_terminal = self.app_settings.show_terminal;
@@ -2182,7 +2351,7 @@ impl Render for RootView {
                         .w(px(terminal_w))
                         .h(px(main_h))
                         .overflow_hidden()
-                        .child(self.terminal.clone()),
+                        .child(self.render_terminal_panel(theme, main_h, cx)),
                 );
         }
         let dock_zones = self.render_dock_zones(theme, cx);
@@ -2232,7 +2401,7 @@ impl Render for RootView {
                         .w_full()
                         .h(px(terminal_h))
                         .overflow_hidden()
-                        .child(self.terminal.clone()),
+                        .child(self.render_terminal_panel(theme, terminal_h, cx)),
                 )
             })
             .child(self.render_status_bar(theme, viewport_w, cx))

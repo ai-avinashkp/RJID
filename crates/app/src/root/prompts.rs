@@ -12,6 +12,7 @@ use rji_theme::Theme;
 
 use super::RootView;
 use crate::text_input::{TextInput, TextInputEvent};
+use rji_project_java::java_source::{JavaKind, create_java_type, create_package, package_for_dir, source_root_for};
 
 /// Every shortcut, for the Help sheet and the welcome page.
 pub(super) const SHORTCUTS: &[(&str, &str)] = &[
@@ -22,10 +23,12 @@ pub(super) const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+X / C / V", "Cut / copy / paste (whole line if nothing selected)"),
     ("Ctrl+F / Ctrl+H", "Find / replace"),
     ("F3 / Shift+F3", "Next / previous match"),
+    ("Ctrl+P / Ctrl+Shift+P", "Go to file / command palette"),
+    ("F12 / Ctrl+Click", "Go to definition"),
     ("Ctrl+G", "Go to line"),
     ("Ctrl+Space", "Code completion"),
     ("Ctrl+. / F2", "Quick fix / rename symbol"),
-    ("Alt+Insert / right-click", "Generate, refactor, imports, format"),
+    ("Shift+Alt+S / Alt+Insert", "Source action: generate, override, organize imports"),
     ("Shift+Alt+O / Shift+Alt+F", "Organize imports / format document"),
     ("Ctrl+/", "Toggle line comment"),
     ("Ctrl+D / Ctrl+L", "Duplicate line / select line"),
@@ -40,6 +43,8 @@ pub(super) const SHORTCUTS: &[(&str, &str)] = &[
 pub(super) enum PromptKind {
     NewFile { dir: PathBuf },
     NewFolder { dir: PathBuf },
+    NewJavaType { dir: PathBuf, kind: JavaKind },
+    NewJavaPackage { dir: PathBuf },
     Rename { path: PathBuf },
     Attach,
 }
@@ -139,6 +144,30 @@ impl RootView {
         );
     }
 
+    /// New Java File…: a name plus the kind (class, interface, …) chosen
+    /// with the chips in the prompt.
+    pub(super) fn prompt_new_java_type(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = match package_for_dir(&dir) {
+            Some(pkg) if !pkg.is_empty() => format!("In package {pkg} — type a name, or sub.package.Name"),
+            Some(_) => "In the default package — type a name, or package.Name".to_string(),
+            None => format!("In {} — type a name", self.relative_display(&dir)),
+        };
+        self.open_input_prompt(PromptKind::NewJavaType { dir, kind: JavaKind::Class }, "New Java File", hint, "", window, cx);
+    }
+
+    /// New Java Package…: a fully-qualified name, prefilled with the
+    /// folder's own package.
+    pub(super) fn prompt_new_java_package(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let initial = package_for_dir(&dir).filter(|p| !p.is_empty()).map(|p| format!("{p}.")).unwrap_or_default();
+        let root = source_root_for(&dir).unwrap_or_else(|| dir.clone());
+        let hint = format!("Created under {}", self.relative_display(&root));
+        self.open_input_prompt(PromptKind::NewJavaPackage { dir }, "New Java Package", hint, &initial, window, cx);
+        // Caret after the prefilled "com.example." rather than selecting it.
+        if let Some(prompt) = self.prompt.as_ref() {
+            prompt.input.update(cx, |input, cx| input.move_to_end(cx));
+        }
+    }
+
     pub(super) fn prompt_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let hint = format!("Rename {}", self.relative_display(&path));
@@ -173,6 +202,8 @@ impl RootView {
         let result = match &prompt.kind {
             PromptKind::NewFile { dir } => create_entry(dir, &value, false).map(|p| (Some(p), false)),
             PromptKind::NewFolder { dir } => create_entry(dir, &value, true).map(|p| (Some(p), true)),
+            PromptKind::NewJavaType { dir, kind } => create_java_type(dir, *kind, &value).map(|p| (Some(p), false)),
+            PromptKind::NewJavaPackage { dir } => create_package(dir, &value).map(|p| (Some(p), true)),
             PromptKind::Rename { path } => rename_entry(path, &value).map(|p| {
                 self.retarget_tabs(path, &p, cx);
                 (None, false)
@@ -337,6 +368,8 @@ impl RootView {
         match action {
             ContextAction::NewFile => self.prompt_new_entry(false, Some(dir), window, cx),
             ContextAction::NewFolder => self.prompt_new_entry(true, Some(dir), window, cx),
+            ContextAction::NewJavaType => self.prompt_new_java_type(dir, window, cx),
+            ContextAction::NewJavaPackage => self.prompt_new_java_package(dir, window, cx),
             ContextAction::Rename => self.prompt_rename(menu.path, window, cx),
             ContextAction::Delete => self.delete_path(menu.path, window, cx),
             ContextAction::CopyPath => {
@@ -424,6 +457,12 @@ impl RootView {
         if let Some(panel) = self.render_run_configs_panel(theme, cx) {
             layers.push(panel.into_any_element());
         }
+        if let Some(palette) = self.render_palette(theme, cx) {
+            layers.push(palette.into_any_element());
+        }
+        if let Some(panel) = self.render_appearance(theme, cx) {
+            layers.push(panel.into_any_element());
+        }
         if let Some((message, at)) = &self.notice
             && at.elapsed() < super::notice_duration(message)
         {
@@ -463,6 +502,8 @@ impl RootView {
         let mut entries: Vec<Option<(&'static str, ContextAction)>> = vec![
             Some(("New File…", ContextAction::NewFile)),
             Some(("New Folder…", ContextAction::NewFolder)),
+            Some(("New Java File…", ContextAction::NewJavaType)),
+            Some(("New Java Package…", ContextAction::NewJavaPackage)),
             None,
             Some(("Rename…", ContextAction::Rename)),
             Some(("Delete", ContextAction::Delete)),
@@ -475,6 +516,11 @@ impl RootView {
             )),
             Some((if menu.is_dir { "Open Terminal Here (cd)" } else { "Open Terminal in This Folder (cd)" }, ContextAction::OpenInTerminal)),
         ];
+        // Java entries only where Java sources live.
+        let dir = if menu.is_dir { menu.path.clone() } else { menu.path.parent().map(Path::to_path_buf).unwrap_or_default() };
+        if self.project.is_none() && source_root_for(&dir).is_none() {
+            entries.retain(|e| !matches!(e, Some((_, ContextAction::NewJavaType | ContextAction::NewJavaPackage))));
+        }
         if self.workspace_root.as_deref() == Some(menu.path.as_path()) {
             // The workspace root itself can't be renamed or deleted here.
             entries.retain(|e| !matches!(e, Some((_, ContextAction::Rename | ContextAction::Delete))));
@@ -527,6 +573,8 @@ impl RootView {
 enum ContextAction {
     NewFile,
     NewFolder,
+    NewJavaType,
+    NewJavaPackage,
     Rename,
     Delete,
     CopyPath,
@@ -585,6 +633,38 @@ fn render_prompt(prompt: &InputPrompt, theme: Theme, cx: &Context<RootView>) -> 
                 .text_color(theme.foreground)
                 .child(div().text_size(px(15.)).child(prompt.title.clone()))
                 .child(div().text_color(theme.foreground_muted).text_size(px(12.)).child(prompt.hint.clone()))
+                // New Java File: what kind of type to create.
+                .children(match &prompt.kind {
+                    PromptKind::NewJavaType { kind: current, .. } => Some(
+                        div().flex().flex_row().flex_wrap().gap_1().children(JavaKind::ALL.iter().enumerate().map(|(i, &kind)| {
+                            let selected = kind == *current;
+                            div()
+                                .id(("java-kind", i))
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .border_1()
+                                .cursor_pointer()
+                                .border_color(if selected { theme.accent } else { theme.border })
+                                .bg(if selected { theme.accent.opacity(0.18) } else { theme.surface })
+                                .text_color(if selected { theme.foreground } else { theme.foreground_muted })
+                                .hover(|s| s.bg(theme.accent.opacity(0.12)))
+                                .child(kind.label())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if let Some(PromptKind::NewJavaType { kind: k, .. }) = this.prompt.as_mut().map(|p| &mut p.kind) {
+                                        *k = kind;
+                                    }
+                                    // Keep typing in the name box.
+                                    if let Some(prompt) = this.prompt.as_ref() {
+                                        let handle = prompt.input.focus_handle(cx);
+                                        window.focus(&handle, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                        })),
+                    ),
+                    _ => None,
+                })
                 .child(prompt.input.clone())
                 .children(prompt.error.clone().map(|e| div().text_color(theme.error).child(e)))
                 .child(

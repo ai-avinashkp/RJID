@@ -3,6 +3,21 @@
 All notable changes to RJID. Versions follow `MAJOR.MINOR.PATCH`; releases are
 tagged `vX.Y.Z` on GitHub and are source-only.
 
+## Unreleased
+
+- Java language server set up automatically on first use (verified download from
+  eclipse.org, with your consent).
+- Go to Definition (F12 / Ctrl+Click, including JDK sources), Go to File (Ctrl+P)
+  and Command Palette (Ctrl+Shift+P).
+- Source Action menu: generate, override/implement, delegate methods, and more.
+- Terminal tabs; `exit` closes a terminal; build results colored green / red.
+- Java-aware project tree: compact package folders, New Java Class / Interface /
+  Enum / Record / Package.
+- Build-file changes re-import with a progress indicator; missing dependency
+  versions are fixed automatically.
+- Theme & Fonts: 13 themes and your choice of coding fonts, with live preview.
+- Auto-save on focus change; tidier Run, Edit and Plugins menus.
+
 ## 0.1.0 (first public preview)
 
 RJID (Rust for Java IDE) is a Java IDE written in Rust on GPUI.
